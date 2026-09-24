@@ -121,11 +121,14 @@ symbol_map U+0600-U+06FF,U+0750-U+077F,U+08A0-U+08FF,U+FB50-U+FDFF,U+FE70-U+FEFF
 
 ## Known Limitations
 
-This patch is a pragmatic, rendering-level solution. Users should be aware of the following:
+This patch is a pragmatic, rendering-layer solution designed for CLI tools, shell commands, and terminal output. Users should be aware of the following confirmed limitations:
 
-* **Full-Screen TUI Applications:** Complex terminal user interfaces (such as `htop`, `tmux`, or file managers like `midnight-commander`) that manually position text at exact terminal columns may exhibit unexpected layout behavior if Arabic text is embedded in fixed-width tabular UI elements.
+* **TUI Applications & Text Editors (Vim / Neovim vs. btop):**
+  * Full-screen monitoring tools that use full-line redraw models (such as `btop`) work correctly.
+  * However, interactive modal editors like **Vim** and **Neovim** display broken or scrambled Arabic text. These editors optimize rendering by redrawing the screen incrementally cell-by-cell rather than printing complete lines at once. This incremental redraw breaks the contiguous line context that this lightweight FriBidi patch assumes.
+  * Fixing this in modal editors would require a significantly deeper architectural overhaul — specifically, tracking paragraphs and BiDi state across the entire screen buffer and supporting terminal-level BiDi escape sequences (similar to the complex implementation in GNOME's VTE engine). Such architectural changes are out of scope for this lightweight rendering fork.
 * **Mouse Selection:** Text selection with the mouse across reordered BiDi boundaries remains tied to Kitty's underlying logical cell indices rather than visual screen coordinates.
-* **Line-Level Scope:** The reordering operates per terminal row. Multi-line wrapped paragraphs are treated as individual visual lines.
+* **Line-Level Scope:** The reordering operates per physical terminal row. Multi-line wrapped paragraphs are treated as independent visual lines.
 * **Experimental Status:** This is a community fork maintained for everyday terminal and shell productivity, not an officially supported upstream feature.
 
 ---
