@@ -4,6 +4,7 @@
 import errno
 import os
 import re
+import tempfile
 from base64 import standard_b64encode
 from contextlib import contextmanager
 from functools import partial
@@ -15,6 +16,7 @@ from kitty.fast_data_types import (
     dnd_set_test_write_func,
     dnd_test_cleanup_fake_window,
     dnd_test_create_fake_window,
+    dnd_test_drag_get_data,
     dnd_test_drag_notify,
     dnd_test_drop_update_mimes,
     dnd_test_fake_drop_data,
@@ -26,9 +28,10 @@ from kitty.fast_data_types import (
 )
 from kitty.machine_id import machine_id
 
-from . import BaseTest, parse_bytes
+from .base import BaseTest, parse_bytes
 
 # ---- helpers ----------------------------------------------------------------
+
 
 def _osc(payload: str) -> bytes:
     """Wrap *payload* in an OSC escape sequence (OSC payload ST)."""
@@ -104,6 +107,7 @@ def client_dir_read(handle_id: int, entry_num: int | None = None, client_id: int
 
 # ---- drag source helpers ----------------------------------------------------
 
+
 def client_drag_register(client_id: int = 0) -> bytes:
     """Escape code a client sends to start offering drags (t=o, no payload)."""
     meta = f'{DND_CODE};t=o:x=1'
@@ -150,8 +154,14 @@ def client_drag_pre_send(idx: int, data_b64: str, client_id: int = 0, more: bool
 
 
 def client_drag_add_image(
-    idx: int, fmt: int, width: int, height: int, data_b64: str,
-    client_id: int = 0, more: bool = False, opacity: int = 0,
+    idx: int,
+    fmt: int,
+    width: int,
+    height: int,
+    data_b64: str,
+    client_id: int = 0,
+    more: bool = False,
+    opacity: int = 0,
 ) -> bytes:
     """Escape code for adding an image thumbnail (t=p:x=-idx:y=fmt:X=w:Y=h ; b64).
 
@@ -214,9 +224,13 @@ def client_drag_cancel(client_id: int = 0) -> bytes:
 
 
 def client_remote_file(
-    uri_idx: int = 0, data_b64: str = '', *,
-    item_type: int = 0, more: bool = False,
-    parent_handle: int = 0, entry_num: int = 0,
+    uri_idx: int = 0,
+    data_b64: str = '',
+    *,
+    item_type: int = 0,
+    more: bool = False,
+    parent_handle: int = 0,
+    entry_num: int = 0,
     client_id: int = 0,
 ) -> bytes:
     """Escape code for remote file data (t=k).
@@ -326,6 +340,7 @@ def dir_handle(e: dict) -> int:
 
 # ---- test context manager ---------------------------------------------------
 
+
 class WriteCapture:
     """Accumulates bytes delivered by the DnD write interceptor."""
 
@@ -347,15 +362,22 @@ class WriteCapture:
 
 
 @contextmanager
-def dnd_test_window(mime_list_cap=0, present_data_cap=0, remote_drag_limit=0):
+def dnd_test_window(mime_list_cap=0, present_data_cap=0, remote_drag_limit=0, case_insensitive_tempdir=-1):
     """Context manager that creates a fake window + write-capture harness.
 
     Yields (window_id, screen, capture) where:
     * ``screen``       – Screen object whose window_id matches the fake window
     * ``capture``      – WriteCapture accumulating bytes sent to the child
+
+    ``case_insensitive_tempdir`` forces kitty to treat the directory used for
+    remote drag data as being on a case-insensitive (1) or case-sensitive (0)
+    filesystem. The default of -1 auto-detects, as in normal operation. Tests
+    that depend on how identically named directory entries are handled must
+    force it, since otherwise their behavior varies by platform (macOS
+    filesystems are typically case-insensitive, Linux ones are not).
     """
     capture = WriteCapture()
-    dnd_set_test_write_func(capture, mime_list_cap, present_data_cap, remote_drag_limit)
+    dnd_set_test_write_func(capture, mime_list_cap, present_data_cap, remote_drag_limit, case_insensitive_tempdir)
     os_window_id, window_id = dnd_test_create_fake_window()
     capture.window_id = window_id
     try:
@@ -370,14 +392,12 @@ machine_id = partial(machine_id, 'tty-dnd-protocol-machine-id')
 
 # ---- test class -------------------------------------------------------------
 
-class TestDnDProtocol(BaseTest):
 
+class TestDnDProtocol(BaseTest):
     def _assert_no_output(self, capture: WriteCapture) -> None:
         self.ae(capture.peek(), b'', 'unexpected output to child')
 
-    def _register_for_drops(
-        self, screen, cap, mimes='text/plain text/uri-list', client_id=0, register_machine_id=True
-    ) -> None:
+    def _register_for_drops(self, screen, cap, mimes='text/plain text/uri-list', client_id=0, register_machine_id=True) -> None:
         meta = f'{DND_CODE};t=a'
         if client_id:
             meta += f':i={client_id}'
@@ -685,6 +705,70 @@ class TestDnDProtocol(BaseTest):
             self.assertEqual(len(r_events), 1, raw)
             self.ae(r_events[0]['payload'], b'')
 
+    def test_data_request_before_drop_denied(self) -> None:
+        """Data requests sent while the drag is merely hovering are rejected with EPERM."""
+        with dnd_test_window() as (screen, cap):
+            self._register_for_drops(screen, cap, 'text/plain text/uri-list')
+            dnd_test_set_mouse_pos(cap.window_id, 0, 0, 0, 0)
+            # Only a move event so far, no drop.
+            dnd_test_fake_drop_event(cap.window_id, False, ['text/plain', 'text/uri-list'])
+            cap.consume()
+
+            # All three request forms must be denied before the drop.
+            for req in (client_request_data(1), client_request_uri_data(2, 1), client_dir_read(2, 1)):
+                parse_bytes(screen, req)
+                events = self._get_events(cap)
+                self.assertEqual(len(events), 1, events)
+                self.ae(events[0]['type'], 'R')
+                self.ae(events[0]['payload'].strip().partition(b':')[0], b'EPERM')
+
+            # The denial must not have terminated the drag session: after an
+            # actual drop, requests work as usual.
+            dnd_test_fake_drop_event(cap.window_id, True, ['text/plain', 'text/uri-list'])
+            cap.consume()
+            parse_bytes(screen, client_request_data(1))
+            dnd_test_fake_drop_data(cap.window_id, 'text/plain', b'hello')
+            combined = b''.join(e['payload'] for e in parse_escape_codes_b64(cap.consume()) if e['type'] == 'r')
+            self.ae(combined, b'hello')
+
+    def test_drag_leave_discards_drag_session_data(self) -> None:
+        """When the drag leaves the window all data obtained from it is discarded."""
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, 'secret.txt'), 'wb') as f:
+                f.write(b'secret data')
+            uri_list = f'file://{root}\r\n'.encode()
+            with dnd_test_window() as (screen, cap):
+                self._setup_uri_drop(screen, cap, uri_list)
+                # Get a directory handle for root.
+                parse_bytes(screen, client_request_uri_data(2, 1))
+                events = parse_escape_codes_b64(cap.consume())
+                d_events = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
+                self.assertTrue(d_events, 'expected directory listing for root')
+                handle_id = dir_handle(d_events[0])
+                self.assertGreater(dnd_test_probe_state(cap.window_id, 'drop_num_dir_handles'), 0)
+                self.assertGreater(dnd_test_probe_state(cap.window_id, 'drop_uri_list_sz'), 0)
+
+                # Drag leaves the window.
+                dnd_test_fake_drop_event(cap.window_id, False, None)
+                cap.consume()  # discard the leave event
+
+                # The URI list, directory handles and any in-flight file
+                # transfer must be gone.
+                self.ae(dnd_test_probe_state(cap.window_id, 'drop_num_dir_handles'), 0)
+                self.ae(dnd_test_probe_state(cap.window_id, 'drop_uri_list_sz'), 0)
+                self.ae(dnd_test_probe_state(cap.window_id, 'drop_file_fd_plus_one'), 0)
+                self.assertFalse(dnd_test_probe_state(cap.window_id, 'drop_dropped'))
+
+                # Requests using the stale handle must fail.
+                parse_bytes(screen, client_dir_read(handle_id, 1))
+                events = self._get_events(cap)
+                self.assertEqual(len(events), 1, events)
+                self.ae(events[0]['type'], 'R')
+                self.ae(events[0]['payload'].strip().partition(b':')[0], b'EPERM')
+
     # ---- remote file/directory transfer tests ----------------
 
     def _setup_uri_drop(self, screen, cap, uri_list_data: bytes, mimes=None):
@@ -706,6 +790,7 @@ class TestDnDProtocol(BaseTest):
         """URI file request sends the content of a regular file as t=r chunks."""
         import os
         import tempfile
+
         content = b'Hello, remote DnD world!\n' * 100
         with tempfile.NamedTemporaryFile(delete=False) as f:
             f.write(content)
@@ -730,6 +815,7 @@ class TestDnDProtocol(BaseTest):
         """File content is transferred byte-for-byte (binary integrity)."""
         import os
         import tempfile
+
         # Use binary content with all byte values to check integrity
         content = bytes(range(256)) * 512  # 128 KiB
         with tempfile.NamedTemporaryFile(delete=False) as f:
@@ -765,6 +851,7 @@ class TestDnDProtocol(BaseTest):
         """URI file request with an index beyond the URI list returns ENOENT."""
         import os
         import tempfile
+
         with tempfile.NamedTemporaryFile(delete=False) as f:
             fpath = f.name
         try:
@@ -783,6 +870,7 @@ class TestDnDProtocol(BaseTest):
         """URI file request without prior text/uri-list request returns EINVAL."""
         import os
         import tempfile
+
         with tempfile.NamedTemporaryFile(delete=False) as f:
             fpath = f.name
         try:
@@ -816,6 +904,7 @@ class TestDnDProtocol(BaseTest):
         import os
         import tempfile
         import uuid
+
         does_not_exist = '/' + str(uuid.uuid4())
         with tempfile.TemporaryDirectory() as root:
             broken_link = os.path.join(root, 'broken.txt')
@@ -828,8 +917,7 @@ class TestDnDProtocol(BaseTest):
                 events = parse_escape_codes_b64(raw)
                 r_events = [e for e in events if e['type'] == 'r']
                 self.assertTrue(r_events, 'expected t=r response for broken symlink')
-                self.assertEqual(r_events[0]['meta'].get('X'), '1',
-                                 'broken symlink response must have X=1')
+                self.assertEqual(r_events[0]['meta'].get('X'), '1', 'broken symlink response must have X=1')
                 target = b''.join(e['payload'] for e in r_events if e['payload'])
                 self.ae(target, does_not_exist.encode())
 
@@ -837,6 +925,7 @@ class TestDnDProtocol(BaseTest):
         """A non-broken symlink to a regular file is transmitted as a symlink (X=1) with the target path."""
         import os
         import tempfile
+
         content = b'content of the real file\n' * 10
         with tempfile.TemporaryDirectory() as root:
             real_file = os.path.join(root, 'real.txt')
@@ -852,8 +941,7 @@ class TestDnDProtocol(BaseTest):
                 events = parse_escape_codes_b64(raw)
                 r_events = [e for e in events if e['type'] == 'r']
                 self.assertTrue(r_events, 'expected t=r response for symlink to file')
-                self.assertEqual(r_events[0]['meta'].get('X'), '1',
-                                 'symlink to file must have X=1')
+                self.assertEqual(r_events[0]['meta'].get('X'), '1', 'symlink to file must have X=1')
                 target = b''.join(e['payload'] for e in r_events if e['payload'])
                 self.ae(target, real_file.encode())
 
@@ -861,6 +949,7 @@ class TestDnDProtocol(BaseTest):
         """A non-broken symlink to a directory is transmitted as a symlink (X=1) with the target path."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             real_dir = os.path.join(root, 'realdir')
             os.makedirs(real_dir)
@@ -876,8 +965,7 @@ class TestDnDProtocol(BaseTest):
                 events = parse_escape_codes_b64(raw)
                 r_events = [e for e in events if e['type'] == 'r']
                 self.assertTrue(r_events, 'expected t=r response for symlink to directory')
-                self.assertEqual(r_events[0]['meta'].get('X'), '1',
-                                 'symlink to directory must have X=1')
+                self.assertEqual(r_events[0]['meta'].get('X'), '1', 'symlink to directory must have X=1')
                 target = b''.join(e['payload'] for e in r_events if e['payload'])
                 self.ae(target, real_dir.encode())
 
@@ -921,21 +1009,15 @@ class TestDnDProtocol(BaseTest):
                 d_events = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
                 self.assertTrue(d_events, 'expected directory listing for root')
 
-                root_listing_payload = b''.join(
-                    chunk for e in d_events for chunk in e['chunks'] if chunk
-                )
+                root_listing_payload = b''.join(chunk for e in d_events for chunk in e['chunks'] if chunk)
                 root_handle_id = dir_handle(d_events[0])
-                self.assertGreater(root_handle_id, 1,
-                                   'root directory handle (X=) must be > 1')
+                self.assertGreater(root_handle_id, 1, 'root directory handle (X=) must be > 1')
                 # For a top-level URI request the response echoes x= and y= from the
                 # request; Y= must be absent because the request had no Y.
                 for ev in d_events:
-                    self.ae(ev['meta'].get('x'), '2',
-                            'mime index must be echoed in root dir response')
-                    self.ae(ev['meta'].get('y'), '1',
-                            'file index must be echoed in root dir response')
-                    self.assertIsNone(ev['meta'].get('Y'),
-                                      'Y= must not be present in top-level dir response')
+                    self.ae(ev['meta'].get('x'), '2', 'mime index must be echoed in root dir response')
+                    self.ae(ev['meta'].get('y'), '1', 'file index must be echoed in root dir response')
+                    self.assertIsNone(ev['meta'].get('Y'), 'Y= must not be present in top-level dir response')
 
                 # Decode null-separated entries (no unique identifier prefix)
                 root_entries = [e for e in root_listing_payload.split(b'\x00') if e]
@@ -954,10 +1036,8 @@ class TestDnDProtocol(BaseTest):
                 events = parse_escape_codes_b64(raw)
                 r_events = [e for e in events if e['type'] == 'r']
                 for ev in r_events:
-                    self.ae(ev['meta'].get('Y'), str(root_handle_id),
-                            'parent handle must be echoed in file response')
-                    self.ae(ev['meta'].get('x'), str(a_idx),
-                            'entry index must be echoed in file response')
+                    self.ae(ev['meta'].get('Y'), str(root_handle_id), 'parent handle must be echoed in file response')
+                    self.ae(ev['meta'].get('x'), str(a_idx), 'entry index must be echoed in file response')
                 a_data = b''.join(e['payload'] for e in r_events if e['payload'])
                 self.ae(a_data, a_content)
 
@@ -969,18 +1049,14 @@ class TestDnDProtocol(BaseTest):
                 b_d_events = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
                 self.assertTrue(b_d_events, 'expected directory listing for b/')
 
-                b_listing_payload = b''.join(
-                    chunk for e in b_d_events for chunk in e['chunks'] if chunk
-                )
+                b_listing_payload = b''.join(chunk for e in b_d_events for chunk in e['chunks'] if chunk)
                 b_handle_id = dir_handle(b_d_events[0])
                 self.assertNotEqual(b_handle_id, root_handle_id)
                 # Unambiguous identification: the response must identify both the
                 # parent dir (Y=) and the entry within it (x=).
                 for ev in b_d_events:
-                    self.ae(ev['meta'].get('Y'), str(root_handle_id),
-                            'parent handle must be echoed in sub-dir listing response')
-                    self.ae(ev['meta'].get('x'), str(b_idx),
-                            'entry index must be echoed in sub-dir listing response')
+                    self.ae(ev['meta'].get('Y'), str(root_handle_id), 'parent handle must be echoed in sub-dir listing response')
+                    self.ae(ev['meta'].get('x'), str(b_idx), 'entry index must be echoed in sub-dir listing response')
 
                 b_entries = [e for e in b_listing_payload.split(b'\x00') if e]
                 b_names = {e.decode() for e in b_entries}
@@ -997,15 +1073,12 @@ class TestDnDProtocol(BaseTest):
                 events = parse_escape_codes_b64(raw)
                 r_events = [e for e in events if e['type'] == 'r']
                 for ev in r_events:
-                    self.ae(ev['meta'].get('Y'), str(b_handle_id),
-                            'parent handle must be echoed in file response')
-                    self.ae(ev['meta'].get('x'), str(bc_idx),
-                            'entry index must be echoed in file response')
+                    self.ae(ev['meta'].get('Y'), str(b_handle_id), 'parent handle must be echoed in file response')
+                    self.ae(ev['meta'].get('x'), str(bc_idx), 'entry index must be echoed in file response')
                 bc_data = b''.join(e['payload'] for e in r_events if e['payload'])
                 self.ae(bc_data, bc_content)
                 # Check SHA-256 integrity
-                self.ae(hashlib.sha256(bc_data).digest(),
-                        hashlib.sha256(bc_content).digest())
+                self.ae(hashlib.sha256(bc_data).digest(), hashlib.sha256(bc_content).digest())
 
                 # Read sub-directory b/d → yet another directory listing (level 3)
                 # Response must echo Y=b_handle_id, x=bd_idx; X= is new handle
@@ -1015,16 +1088,12 @@ class TestDnDProtocol(BaseTest):
                 bd_d_events = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
                 self.assertTrue(bd_d_events, 'expected directory listing for b/d/')
 
-                bd_listing_payload = b''.join(
-                    chunk for e in bd_d_events for chunk in e['chunks'] if chunk
-                )
+                bd_listing_payload = b''.join(chunk for e in bd_d_events for chunk in e['chunks'] if chunk)
                 bd_handle_id = dir_handle(bd_d_events[0])
                 # Unambiguous identification for third-level directory.
                 for ev in bd_d_events:
-                    self.ae(ev['meta'].get('Y'), str(b_handle_id),
-                            'parent handle must be echoed in level-3 sub-dir listing response')
-                    self.ae(ev['meta'].get('x'), str(bd_idx),
-                            'entry index must be echoed in level-3 sub-dir listing response')
+                    self.ae(ev['meta'].get('Y'), str(b_handle_id), 'parent handle must be echoed in level-3 sub-dir listing response')
+                    self.ae(ev['meta'].get('x'), str(bd_idx), 'entry index must be echoed in level-3 sub-dir listing response')
 
                 bd_entries = [e for e in bd_listing_payload.split(b'\x00') if e]
                 bd_names = {e.decode() for e in bd_entries}
@@ -1039,10 +1108,8 @@ class TestDnDProtocol(BaseTest):
                 events = parse_escape_codes_b64(raw)
                 r_events = [e for e in events if e['type'] == 'r']
                 for ev in r_events:
-                    self.ae(ev['meta'].get('Y'), str(bd_handle_id),
-                            'parent handle must be echoed in deep file response')
-                    self.ae(ev['meta'].get('x'), str(bde_idx),
-                            'entry index must be echoed in deep file response')
+                    self.ae(ev['meta'].get('Y'), str(bd_handle_id), 'parent handle must be echoed in deep file response')
+                    self.ae(ev['meta'].get('x'), str(bde_idx), 'entry index must be echoed in deep file response')
                 bde_data = b''.join(e['payload'] for e in r_events if e['payload'])
                 self.ae(bde_data, bde_content)
 
@@ -1057,6 +1124,7 @@ class TestDnDProtocol(BaseTest):
         """Closing a directory handle invalidates it; subsequent requests return EINVAL."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             open(os.path.join(root, 'f.txt'), 'w').close()
             uri_list = f'file://{root}\r\n'.encode()
@@ -1084,6 +1152,7 @@ class TestDnDProtocol(BaseTest):
         """Reading a directory entry with an out-of-range index returns ENOENT."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             open(os.path.join(root, 'only.txt'), 'w').close()
             uri_list = f'file://{root}\r\n'.encode()
@@ -1106,6 +1175,7 @@ class TestDnDProtocol(BaseTest):
         """Directory listings should not contain a unique identifier prefix."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             open(os.path.join(root, 'hello.txt'), 'w').close()
             uri_list = f'file://{root}\r\n'.encode()
@@ -1115,9 +1185,7 @@ class TestDnDProtocol(BaseTest):
                 raw = cap.consume()
                 events = parse_escape_codes_b64(raw)
                 d_ev = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
-                payload = b''.join(
-                    chunk for e in d_ev for chunk in e['chunks'] if chunk
-                )
+                payload = b''.join(chunk for e in d_ev for chunk in e['chunks'] if chunk)
                 entries = [e.decode() for e in payload.split(b'\x00') if e]
                 # All entries should be actual file/dir names, no dev:inode prefix
                 self.assertEqual(entries, ['hello.txt'])
@@ -1126,6 +1194,7 @@ class TestDnDProtocol(BaseTest):
         """Symlinks to files inside directories are reported with t=r:X=1 and the symlink target."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             real_file = os.path.join(root, 'real.txt')
             with open(real_file, 'w') as f:
@@ -1138,9 +1207,7 @@ class TestDnDProtocol(BaseTest):
                 raw = cap.consume()
                 events = parse_escape_codes_b64(raw)
                 d_ev = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
-                payload = b''.join(
-                    chunk for e in d_ev for chunk in e['chunks'] if chunk
-                )
+                payload = b''.join(chunk for e in d_ev for chunk in e['chunks'] if chunk)
                 hid = dir_handle(d_ev[0])
                 entries = [e.decode() for e in payload.split(b'\x00') if e]
                 self.assertIn('link.txt', entries)
@@ -1154,8 +1221,7 @@ class TestDnDProtocol(BaseTest):
                 r_events = [e for e in events if e['type'] == 'r']
                 self.assertTrue(r_events, 'expected t=r response for symlink')
                 # Check X=1 flag indicating symlink
-                self.assertEqual(r_events[0]['meta'].get('X'), '1',
-                                 'symlink response must have X=1')
+                self.assertEqual(r_events[0]['meta'].get('X'), '1', 'symlink response must have X=1')
                 # Payload should be the symlink target
                 target = b''.join(e['payload'] for e in r_events if e['payload'])
                 self.ae(target, b'real.txt')
@@ -1164,6 +1230,7 @@ class TestDnDProtocol(BaseTest):
         """Symlinks to directories inside directories are reported with t=r:X=1."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             os.mkdir(os.path.join(root, 'subdir'))
             os.symlink('subdir', os.path.join(root, 'link_to_dir'))
@@ -1174,9 +1241,7 @@ class TestDnDProtocol(BaseTest):
                 raw = cap.consume()
                 events = parse_escape_codes_b64(raw)
                 d_ev = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
-                payload = b''.join(
-                    chunk for e in d_ev for chunk in e['chunks'] if chunk
-                )
+                payload = b''.join(chunk for e in d_ev for chunk in e['chunks'] if chunk)
                 hid = dir_handle(d_ev[0])
                 entries = [e.decode() for e in payload.split(b'\x00') if e]
                 self.assertIn('link_to_dir', entries)
@@ -1196,6 +1261,7 @@ class TestDnDProtocol(BaseTest):
         """Symlinks with absolute targets report the full absolute path."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             real_file = os.path.join(root, 'abs_target.txt')
             with open(real_file, 'w') as f:
@@ -1208,9 +1274,7 @@ class TestDnDProtocol(BaseTest):
                 raw = cap.consume()
                 events = parse_escape_codes_b64(raw)
                 d_ev = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
-                payload = b''.join(
-                    chunk for e in d_ev for chunk in e['chunks'] if chunk
-                )
+                payload = b''.join(chunk for e in d_ev for chunk in e['chunks'] if chunk)
                 hid = dir_handle(d_ev[0])
                 entries = [e.decode() for e in payload.split(b'\x00') if e]
                 link_idx = entries.index('abs_link.txt') + 1
@@ -1228,6 +1292,7 @@ class TestDnDProtocol(BaseTest):
         """Regular files in directories must NOT have the X=1 flag."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             with open(os.path.join(root, 'regular.txt'), 'w') as f:
                 f.write('hello')
@@ -1238,9 +1303,7 @@ class TestDnDProtocol(BaseTest):
                 raw = cap.consume()
                 events = parse_escape_codes_b64(raw)
                 d_ev = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
-                payload = b''.join(
-                    chunk for e in d_ev for chunk in e['chunks'] if chunk
-                )
+                payload = b''.join(chunk for e in d_ev for chunk in e['chunks'] if chunk)
                 hid = dir_handle(d_ev[0])
                 entries = [e.decode() for e in payload.split(b'\x00') if e]
                 reg_idx = entries.index('regular.txt') + 1
@@ -1251,8 +1314,7 @@ class TestDnDProtocol(BaseTest):
                 r_events = [e for e in events if e['type'] == 'r']
                 self.assertTrue(r_events)
                 # Regular files must not have X=1
-                self.assertNotEqual(r_events[0]['meta'].get('X'), '1',
-                                    'regular file must not have X=1 symlink flag')
+                self.assertNotEqual(r_events[0]['meta'].get('X'), '1', 'regular file must not have X=1 symlink flag')
                 data = b''.join(e['payload'] for e in r_events if e['payload'])
                 self.ae(data, b'hello')
 
@@ -1260,6 +1322,7 @@ class TestDnDProtocol(BaseTest):
         """Directory with both regular files and symlinks handles each correctly."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             with open(os.path.join(root, 'data.bin'), 'wb') as f:
                 f.write(b'\x00\x01\x02\x03')
@@ -1271,9 +1334,7 @@ class TestDnDProtocol(BaseTest):
                 raw = cap.consume()
                 events = parse_escape_codes_b64(raw)
                 d_ev = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
-                payload = b''.join(
-                    chunk for e in d_ev for chunk in e['chunks'] if chunk
-                )
+                payload = b''.join(chunk for e in d_ev for chunk in e['chunks'] if chunk)
                 hid = dir_handle(d_ev[0])
                 entries = [e.decode() for e in payload.split(b'\x00') if e]
 
@@ -1284,8 +1345,7 @@ class TestDnDProtocol(BaseTest):
                 events = parse_escape_codes_b64(raw)
                 r_events = [e for e in events if e['type'] == 'r']
                 self.assertNotEqual(r_events[0]['meta'].get('X'), '1')
-                self.ae(b''.join(e['payload'] for e in r_events if e['payload']),
-                        b'\x00\x01\x02\x03')
+                self.ae(b''.join(e['payload'] for e in r_events if e['payload']), b'\x00\x01\x02\x03')
 
                 # Read symlink
                 alias_idx = entries.index('alias.bin') + 1
@@ -1294,13 +1354,13 @@ class TestDnDProtocol(BaseTest):
                 events = parse_escape_codes_b64(raw)
                 r_events = [e for e in events if e['type'] == 'r']
                 self.assertEqual(r_events[0]['meta'].get('X'), '1')
-                self.ae(b''.join(e['payload'] for e in r_events if e['payload']),
-                        b'data.bin')
+                self.ae(b''.join(e['payload'] for e in r_events if e['payload']), b'data.bin')
 
     def test_dir_nested_symlink_in_subdir(self) -> None:
         """Symlinks inside nested subdirectories are handled correctly."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             sub = os.path.join(root, 'sub')
             os.mkdir(sub)
@@ -1314,9 +1374,7 @@ class TestDnDProtocol(BaseTest):
                 raw = cap.consume()
                 events = parse_escape_codes_b64(raw)
                 d_ev = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
-                payload = b''.join(
-                    chunk for e in d_ev for chunk in e['chunks'] if chunk
-                )
+                payload = b''.join(chunk for e in d_ev for chunk in e['chunks'] if chunk)
                 root_hid = dir_handle(d_ev[0])
                 entries = [e.decode() for e in payload.split(b'\x00') if e]
                 sub_idx = entries.index('sub') + 1
@@ -1326,9 +1384,7 @@ class TestDnDProtocol(BaseTest):
                 raw = cap.consume()
                 events = parse_escape_codes_b64(raw)
                 d_ev = [e for e in events if e['type'] == 'r' and is_dir_event(e)]
-                sub_payload = b''.join(
-                    chunk for e in d_ev for chunk in e['chunks'] if chunk
-                )
+                sub_payload = b''.join(chunk for e in d_ev for chunk in e['chunks'] if chunk)
                 sub_hid = dir_handle(d_ev[0])
                 sub_entries = [e.decode() for e in sub_payload.split(b'\x00') if e]
                 self.assertIn('nested_link.txt', sub_entries)
@@ -1339,13 +1395,13 @@ class TestDnDProtocol(BaseTest):
                 events = parse_escape_codes_b64(raw)
                 r_events = [e for e in events if e['type'] == 'r']
                 self.assertEqual(r_events[0]['meta'].get('X'), '1')
-                self.ae(b''.join(e['payload'] for e in r_events if e['payload']),
-                        b'target.txt')
+                self.ae(b''.join(e['payload'] for e in r_events if e['payload']), b'target.txt')
 
     def test_dir_entry_one_based_index(self) -> None:
         """Directory entry index 1 reads the first entry (1-based)."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             with open(os.path.join(root, 'first.txt'), 'w') as f:
                 f.write('first file')
@@ -1371,6 +1427,7 @@ class TestDnDProtocol(BaseTest):
         """Top-level symlink in URI list is transmitted as a symlink (X=1) with the target path."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             real = os.path.join(root, 'real.txt')
             with open(real, 'w') as f:
@@ -1385,8 +1442,7 @@ class TestDnDProtocol(BaseTest):
                 events = parse_escape_codes_b64(raw)
                 r_events = [e for e in events if e['type'] == 'r']
                 self.assertTrue(r_events, 'top-level symlink to file should be transmitted as symlink')
-                self.assertEqual(r_events[0]['meta'].get('X'), '1',
-                                 'top-level symlink to file must have X=1')
+                self.assertEqual(r_events[0]['meta'].get('X'), '1', 'top-level symlink to file must have X=1')
                 target = b''.join(e['payload'] for e in r_events if e['payload'])
                 self.ae(target, real.encode())
 
@@ -1394,6 +1450,7 @@ class TestDnDProtocol(BaseTest):
         """Top-level symlink to directory in URI list is transmitted as a symlink (X=1) with the target path."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             sub = os.path.join(root, 'realdir')
             os.mkdir(sub)
@@ -1409,8 +1466,7 @@ class TestDnDProtocol(BaseTest):
                 events = parse_escape_codes_b64(raw)
                 r_events = [e for e in events if e['type'] == 'r']
                 self.assertTrue(r_events, 'top-level symlink to dir should be transmitted as symlink')
-                self.assertEqual(r_events[0]['meta'].get('X'), '1',
-                                 'top-level symlink to directory must have X=1')
+                self.assertEqual(r_events[0]['meta'].get('X'), '1', 'top-level symlink to directory must have X=1')
                 target = b''.join(e['payload'] for e in r_events if e['payload'])
                 self.ae(target, sub.encode())
 
@@ -1418,6 +1474,7 @@ class TestDnDProtocol(BaseTest):
         """Closing the window while dir handles are open frees all resources (no crash)."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             open(os.path.join(root, 'f.txt'), 'w').close()
             uri_list = f'file://{root}\r\n'.encode()
@@ -1975,8 +2032,6 @@ class TestDnDProtocol(BaseTest):
             parse_bytes(screen, client_drag_add_image(1, 0, 2, 1, data_b64, opacity=1024))
             self._assert_no_output(cap)
 
-
-
     def test_x_key_echoed_in_data_response(self) -> None:
         """x= key is echoed in data responses to identify which request is being answered."""
         payload_data = b'hello disambiguation'
@@ -2118,6 +2173,7 @@ class TestDnDProtocol(BaseTest):
         """x= and y= keys are echoed in URI file data responses."""
         import os
         import tempfile
+
         content = b'URI file with disambiguation\n'
         with tempfile.NamedTemporaryFile(delete=False) as f:
             f.write(content)
@@ -2160,6 +2216,7 @@ class TestDnDProtocol(BaseTest):
         """
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             open(os.path.join(root, 'file.txt'), 'w').close()
             uri_list = f'file://{root}\r\n'.encode()
@@ -2178,13 +2235,13 @@ class TestDnDProtocol(BaseTest):
                     # In a fresh window the handle counter starts at 1, so the
                     # first allocated handle must be exactly 2.
                     self.ae(handle, 2, 'first allocated directory handle must be 2')
-                    self.assertIsNone(ev['meta'].get('Y'),
-                                     'Y= must not be present in top-level dir response')
+                    self.assertIsNone(ev['meta'].get('Y'), 'Y= must not be present in top-level dir response')
 
     def test_Y_and_x_keys_in_dir_entry_file_response(self) -> None:
         """Y= and x= keys are echoed when reading a file via directory handle."""
         import os
         import tempfile
+
         content = b'directory file content\n'
         with tempfile.TemporaryDirectory() as root:
             with open(os.path.join(root, 'f.txt'), 'wb') as f:
@@ -2218,6 +2275,7 @@ class TestDnDProtocol(BaseTest):
         """Y= and x= keys are echoed when a directory entry read fails."""
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as root:
             open(os.path.join(root, 'only.txt'), 'w').close()
             uri_list = f'file://{root}\r\n'.encode()
@@ -2242,6 +2300,7 @@ class TestDnDProtocol(BaseTest):
         """Mixed MIME data and URI file requests are processed in FIFO order."""
         import os
         import tempfile
+
         file_content = b'mixed request file\n'
         with tempfile.NamedTemporaryFile(delete=False) as f:
             f.write(file_content)
@@ -2321,9 +2380,7 @@ class TestDnDProtocol(BaseTest):
 
     # ---- Remote drag (t=k) tests --------------------------------------------
 
-    def _setup_remote_drag(self, screen, cap, uri_list_data: bytes,
-                           mimes: str = 'text/plain text/uri-list',
-                           operations: int = 1, client_id: int = 0):
+    def _setup_remote_drag(self, screen, cap, uri_list_data: bytes, mimes: str = 'text/plain text/uri-list', operations: int = 1, client_id: int = 0):
         """Set up a remote drag offer in DROPPED state with uri-list data delivered.
 
         1. Register for drag offers with a *different* machine id (so is_remote_client=True).
@@ -2398,21 +2455,17 @@ class TestDnDProtocol(BaseTest):
             # Entry 1: file1.txt (y=1 is 1-based)
             content1 = b'content of file1'
             b64 = standard_b64encode(content1).decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=2, entry_num=1))
             self._assert_no_output(cap)
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=2, entry_num=1))
             self._assert_no_output(cap)
 
             # Entry 2: file2.txt
             content2 = b'content of file2'
             b64 = standard_b64encode(content2).decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=2, entry_num=2))
             self._assert_no_output(cap)
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=2, entry_num=2))
             self._assert_no_output(cap)
             self.assert_drag_data_complete(cap)
 
@@ -2471,18 +2524,14 @@ class TestDnDProtocol(BaseTest):
 
             # Child 1: regular file
             b64 = standard_b64encode(b'readme content').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=2, entry_num=1))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=2, entry_num=1))
             self._assert_no_output(cap)
 
             # Child 2: symlink (X=1)
             b64 = standard_b64encode(b'/target/path').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=1, parent_handle=2, entry_num=2))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=1, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=1, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=1, parent_handle=2, entry_num=2))
             self._assert_no_output(cap)
             self.assert_drag_data_complete(cap)
 
@@ -2511,49 +2560,37 @@ class TestDnDProtocol(BaseTest):
             # Level 1: children of root (handle=2)
             # Entry 1: file_a.txt (regular file)
             b64 = standard_b64encode(b'content_a').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=2, entry_num=1))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=2, entry_num=1))
 
             # Entry 2: sub1 (subdirectory, handle=3)
             sub1_entries = b'file_b.txt\x00subsub'
             b64 = standard_b64encode(sub1_entries).decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=3, parent_handle=2, entry_num=2))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=3, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=3, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=3, parent_handle=2, entry_num=2))
 
             # Level 2: children of sub1 (handle=3)
             # Entry 1: file_b.txt
             b64 = standard_b64encode(b'content_b').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=3, entry_num=1))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=3, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=3, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=3, entry_num=1))
 
             # Entry 2: subsub (subdirectory, handle=4)
             subsub_entries = b'file_c.txt\x00link'
             b64 = standard_b64encode(subsub_entries).decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=4, parent_handle=3, entry_num=2))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=4, parent_handle=3, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=4, parent_handle=3, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=4, parent_handle=3, entry_num=2))
 
             # Level 3: children of subsub (handle=4)
             # Entry 1: file_c.txt
             b64 = standard_b64encode(b'content_c').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=4, entry_num=1))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=4, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=4, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=4, entry_num=1))
 
             # Entry 2: link (symlink, type=1)
             b64 = standard_b64encode(b'/target').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=1, parent_handle=4, entry_num=2))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=1, parent_handle=4, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=1, parent_handle=4, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=1, parent_handle=4, entry_num=2))
             self.assert_drag_data_complete(cap)
 
     def test_remote_drag_deep_directory_tree_depth_first(self) -> None:
@@ -2580,49 +2617,37 @@ class TestDnDProtocol(BaseTest):
 
             # Entry 1 of root: file_a.txt (file)
             b64 = standard_b64encode(b'content_a').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=2, entry_num=1))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=2, entry_num=1))
 
             # Entry 2 of root: sub1 (directory, handle=3)
             sub1_entries = b'file_b.txt\x00subsub'
             b64 = standard_b64encode(sub1_entries).decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=3, parent_handle=2, entry_num=2))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=3, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=3, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=3, parent_handle=2, entry_num=2))
 
             # Depth first: immediately descend into sub1
             # Entry 1 of sub1: file_b.txt
             b64 = standard_b64encode(b'content_b').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=3, entry_num=1))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=3, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=3, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=3, entry_num=1))
 
             # Entry 2 of sub1: subsub (directory, handle=4)
             subsub_entries = b'file_c.txt\x00link'
             b64 = standard_b64encode(subsub_entries).decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=4, parent_handle=3, entry_num=2))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=4, parent_handle=3, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=4, parent_handle=3, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=4, parent_handle=3, entry_num=2))
 
             # Depth first: immediately descend into subsub
             # Entry 1 of subsub: file_c.txt
             b64 = standard_b64encode(b'content_c').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=4, entry_num=1))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=4, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=4, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=4, entry_num=1))
 
             # Entry 2 of subsub: link (symlink)
             b64 = standard_b64encode(b'/target').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=1, parent_handle=4, entry_num=2))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=1, parent_handle=4, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=1, parent_handle=4, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=1, parent_handle=4, entry_num=2))
 
             self.assert_drag_data_complete(cap)
             self._assert_no_output(cap)
@@ -2662,8 +2687,7 @@ class TestDnDProtocol(BaseTest):
 
             # Entry number 2 is out of bounds (only 1 entry)
             b64 = standard_b64encode(b'data').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=2, entry_num=2))
             self.assert_error(cap)
 
     def test_remote_drag_invalid_handle(self) -> None:
@@ -2680,8 +2704,7 @@ class TestDnDProtocol(BaseTest):
 
             # Use non-existent handle 99
             b64 = standard_b64encode(b'data').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=99, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=99, entry_num=1))
             self.assert_error(cap)
 
     def test_remote_drag_invalid_base64(self) -> None:
@@ -2797,77 +2820,65 @@ class TestDnDProtocol(BaseTest):
 
             # alpha.txt (child 1 of root)
             b64 = standard_b64encode(b'alpha content').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=10, entry_num=1))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=10, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=10, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=10, entry_num=1))
 
             # beta (child 2 of root, handle=20)
             beta_entries = b'gamma.txt\x00delta'
             b64 = standard_b64encode(beta_entries).decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=20, parent_handle=10, entry_num=2))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=20, parent_handle=10, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=20, parent_handle=10, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=20, parent_handle=10, entry_num=2))
 
             # eta (child 3 of root, symlink)
             b64 = standard_b64encode(b'/link-tgt').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=1, parent_handle=10, entry_num=3))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=1, parent_handle=10, entry_num=3))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=1, parent_handle=10, entry_num=3))
+            parse_bytes(screen, client_remote_file(1, '', item_type=1, parent_handle=10, entry_num=3))
 
             # gamma.txt (child 1 of beta)
             b64 = standard_b64encode(b'gamma content').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=20, entry_num=1))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=20, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=20, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=20, entry_num=1))
 
             # delta (child 2 of beta, handle=30)
             delta_entries = b'epsilon\x00zeta'
             b64 = standard_b64encode(delta_entries).decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=30, parent_handle=20, entry_num=2))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=30, parent_handle=20, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=30, parent_handle=20, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=30, parent_handle=20, entry_num=2))
 
             # epsilon (child 1 of delta)
             b64 = standard_b64encode(b'epsilon content').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=30, entry_num=1))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=30, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=30, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=30, entry_num=1))
 
             # zeta (child 2 of delta, symlink)
             b64 = standard_b64encode(b'/zeta-target').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=1, parent_handle=30, entry_num=2))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=1, parent_handle=30, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=1, parent_handle=30, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=1, parent_handle=30, entry_num=2))
 
             self._assert_no_output(cap)
             self.assert_drag_data_complete(cap)
 
     def test_remote_drag_process_item_data_basic(self) -> None:
-        """Basic drag_process_item_data: send data for a MIME type after DROPPED state."""
-        with dnd_test_window() as (screen, cap):
-            # Set up a non-remote drag with text/plain
-            parse_bytes(screen, _osc(f'{DND_CODE};t=o:x=1;{machine_id()}'))
-            parse_bytes(screen, client_drag_offer_mimes(1, 'text/plain'))
-            cap.consume()
-            dnd_test_force_drag_dropped(cap.window_id)
-            dnd_test_request_drag_data(cap.window_id, 0)
-            # Send data for text/plain (index 0)
-            b64 = standard_b64encode(b'test data').decode()
-            parse_bytes(screen, client_drag_send_data(0, b64))
-            self._assert_no_output(cap)
-            # End of data
-            parse_bytes(screen, client_drag_send_data(0, ''))
-            # Should get a notification (but no error)
-            events = self._get_events(cap)
-            for ev in events:
-                self.assertNotEqual(ev['type'], 'E', f'unexpected error: {ev}')
+        """MIME data reads finish at EOF, even when no data was sent."""
+        for data in (b'', b'test data'):
+            with self.subTest(data=data), dnd_test_window() as (screen, cap):
+                parse_bytes(screen, _osc(f'{DND_CODE};t=o:x=1;{machine_id()}'))
+                parse_bytes(screen, client_drag_offer_mimes(1, 'text/plain'))
+                cap.consume()
+                dnd_test_force_drag_dropped(cap.window_id)
+                with self.assertRaises(OSError) as pending:
+                    dnd_test_drag_get_data(cap.window_id, 'text/plain')
+                self.assertEqual(pending.exception.errno, errno.EAGAIN)
+                cap.consume()
+                if data:
+                    parse_bytes(screen, client_drag_send_data(0, standard_b64encode(data).decode(), more=True))
+                    self.assertEqual(dnd_test_drag_get_data(cap.window_id, 'text/plain'), data)
+                    with self.assertRaises(OSError) as pending:
+                        dnd_test_drag_get_data(cap.window_id, 'text/plain')
+                    self.assertEqual(pending.exception.errno, errno.EAGAIN)
+                parse_bytes(screen, client_drag_send_data(0, ''))
+                self.assertEqual(dnd_test_drag_get_data(cap.window_id, 'text/plain'), b'')
+                self._assert_no_output(cap)
 
     def test_remote_drag_process_item_data_error(self) -> None:
         """Client can report an error via t=E for a MIME data delivery."""
@@ -2881,6 +2892,9 @@ class TestDnDProtocol(BaseTest):
             parse_bytes(screen, client_drag_send_error(0, 'EPERM'))
             # The error should propagate but not crash
             cap.consume()
+            with self.assertRaises(OSError) as failed:
+                dnd_test_drag_get_data(cap.window_id, 'text/plain')
+            self.assertEqual(failed.exception.errno, errno.EPERM)
 
     def test_remote_drag_process_item_data_invalid_index(self) -> None:
         """Sending data for a non-existent MIME index is rejected."""
@@ -2913,10 +2927,8 @@ class TestDnDProtocol(BaseTest):
 
             # Child of directory (entry 1)
             b64 = standard_b64encode(b'child content').decode()
-            parse_bytes(screen, client_remote_file(
-                2, b64, item_type=0, parent_handle=5, entry_num=1))
-            parse_bytes(screen, client_remote_file(
-                2, '', item_type=0, parent_handle=5, entry_num=1))
+            parse_bytes(screen, client_remote_file(2, b64, item_type=0, parent_handle=5, entry_num=1))
+            parse_bytes(screen, client_remote_file(2, '', item_type=0, parent_handle=5, entry_num=1))
 
             # URI 3: symlink
             b64 = standard_b64encode(b'/symlink/target').decode()
@@ -2972,6 +2984,142 @@ class TestDnDProtocol(BaseTest):
             self.assertTrue(os.path.isfile(child_path), f'empty child file must exist on disk: {child_path}')
             self.assertEqual(os.path.getsize(child_path), 0, f'child file must be empty: {child_path}')
 
+    def assert_symlink_traversal_refused(self, cap) -> None:
+        """The drag must have been aborted because a directory entry was a symlink.
+
+        O_NOFOLLOW combined with O_DIRECTORY reports ENOTDIR on Linux and ELOOP on
+        some other platforms, so accept either.
+        """
+        events = self._get_events(cap)
+        self.assertEqual(len(events), 1, events)
+        self.ae(events[0]['type'], 'E')
+        self.assertIn(events[0]['payload'].partition(b':')[0], (b'ENOTDIR', b'ELOOP'), events)
+
+    def test_remote_drag_symlinked_subdir_cannot_escape_tempdir(self) -> None:
+        """A directory entry that resolves through a symlink must not be written to.
+
+        A malicious client can send a directory listing containing two entries with
+        the same name, registering the first as a symlink pointing outside the
+        temporary directory and the second as a directory. The symlink creation
+        succeeds and the mkdirat for the directory fails with EEXIST (which is
+        ignored), so a subsequent request to write into that "directory" used to
+        follow the symlink and write attacker controlled files at an arbitrary
+        location.
+
+        The temporary directory is forced to be case-sensitive as on a
+        case-insensitive filesystem the duplicate name is renamed before it can
+        collide, see test_remote_drag_case_insensitive_duplicate_entries.
+        """
+        uri_list = b'file:///home/user/root\r\n'
+        with tempfile.TemporaryDirectory() as escape_target, dnd_test_window(case_insensitive_tempdir=0) as (screen, cap):
+            self._setup_remote_drag(screen, cap, uri_list)
+            # Top-level directory (handle 2) with two identically named entries
+            b64 = standard_b64encode(b'evil\x00evil').decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=2))
+            self._assert_no_output(cap)
+
+            # Entry 1: symlink named "evil" pointing outside the temporary directory
+            b64 = standard_b64encode(escape_target.encode()).decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=1, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=1, parent_handle=2, entry_num=1))
+            self._assert_no_output(cap)
+
+            # Entry 2: directory named "evil" (handle 3), mkdirat fails with EEXIST
+            b64 = standard_b64encode(b'pwned.txt').decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=3, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=3, parent_handle=2, entry_num=2))
+            self._assert_no_output(cap)
+
+            # Now write a child of the "directory" -- must not traverse the symlink
+            b64 = standard_b64encode(b'owned').decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=3, entry_num=1))
+            # kitty must refuse to open the symlinked directory and abort the drag
+            self.assert_symlink_traversal_refused(cap)
+
+            escaped = os.path.join(escape_target, 'pwned.txt')
+            self.assertFalse(os.path.exists(escaped), f'drag source data escaped the temporary directory to: {escaped}')
+            self.assertEqual(os.listdir(escape_target), [], 'drag source wrote data outside its temporary directory')
+
+    def test_remote_drag_symlinked_intermediate_component_cannot_escape(self) -> None:
+        """A symlink at an intermediate component of a sub-directory path must not be traversed.
+
+        As above, the temporary directory is forced to be case-sensitive so that
+        the two identically named entries actually collide on all platforms.
+        """
+        uri_list = b'file:///home/user/root\r\n'
+        with tempfile.TemporaryDirectory() as escape_target, dnd_test_window(case_insensitive_tempdir=0) as (screen, cap):
+            os.mkdir(os.path.join(escape_target, 'sub'))
+            self._setup_remote_drag(screen, cap, uri_list)
+            # root/ (handle 2) with two entries both named "evil"
+            b64 = standard_b64encode(b'evil\x00evil').decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=2))
+
+            # Entry 1: symlink "evil" -> outside
+            b64 = standard_b64encode(escape_target.encode()).decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=1, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=1, parent_handle=2, entry_num=1))
+
+            # Entry 2: directory "evil" (handle 3) containing a sub directory "sub"
+            b64 = standard_b64encode(b'sub').decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=3, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=3, parent_handle=2, entry_num=2))
+            self._assert_no_output(cap)
+
+            # "sub" is a directory (handle 4) that would be reached via root/evil/sub
+            b64 = standard_b64encode(b'pwned.txt').decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=4, parent_handle=3, entry_num=1))
+            self.assert_symlink_traversal_refused(cap)
+
+            b64 = standard_b64encode(b'owned').decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=4, entry_num=1))
+            cap.consume()
+
+            escaped = os.path.join(escape_target, 'sub', 'pwned.txt')
+            self.assertFalse(os.path.exists(escaped), f'drag source data escaped the temporary directory to: {escaped}')
+            self.assertEqual(os.listdir(os.path.join(escape_target, 'sub')), [], 'drag source wrote data outside its temporary directory')
+
+    def test_remote_drag_case_insensitive_duplicate_entries(self) -> None:
+        """On a case-insensitive filesystem identically named entries are renamed apart.
+
+        This is the code path taken on macOS, where the temporary directory is
+        normally on a case-insensitive filesystem. The symlink and the directory
+        no longer collide, so the drag succeeds, but the data must still be
+        written inside the temporary directory, not through the symlink.
+        """
+        uri_list = b'file:///home/user/root\r\n'
+        with tempfile.TemporaryDirectory() as escape_target, dnd_test_window(case_insensitive_tempdir=1) as (screen, cap):
+            self._setup_remote_drag(screen, cap, uri_list)
+            # root/ (handle 2) with two entries both named "evil"
+            b64 = standard_b64encode(b'evil\x00evil').decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=2))
+
+            # Entry 1: symlink "evil" -> outside
+            b64 = standard_b64encode(escape_target.encode()).decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=1, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=1, parent_handle=2, entry_num=1))
+
+            # Entry 2: directory "evil" (handle 3), renamed to avoid the collision
+            b64 = standard_b64encode(b'file.txt').decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=3, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=3, parent_handle=2, entry_num=2))
+            self._assert_no_output(cap)
+
+            b64 = standard_b64encode(b'data').decode()
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=3, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=3, entry_num=1))
+            self.assert_drag_data_complete(cap)
+
+            root_path = dnd_test_probe_state(cap.window_id, 'drag_remote_item_path:0')
+            self.assertIsNotNone(root_path, 'root path should be known')
+            written = os.path.join(root_path, 'case-conflict-1-evil', 'file.txt')
+            self.assertTrue(os.path.isfile(written), f'renamed directory entry must exist at: {written}')
+            with open(written, 'rb') as f:
+                self.ae(f.read(), b'data')
+            self.assertEqual(os.listdir(escape_target), [], 'drag source wrote data outside its temporary directory')
+
     def test_remote_drag_uri_list_with_comments(self) -> None:
         """URI list with comment lines (starting with #) should filter them out."""
         uri_list = b'# this is a comment\r\nfile:///home/user/f.txt\r\n# another comment\r\n'
@@ -3007,17 +3155,13 @@ class TestDnDProtocol(BaseTest):
 
             # Verify children are accessible: entry 1 and entry 2
             b64 = standard_b64encode(b'c1').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=2, entry_num=1))
             self._assert_no_output(cap)
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=2, entry_num=1))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=2, entry_num=1))
             self._assert_no_output(cap)
             b64 = standard_b64encode(b'c2').decode()
-            parse_bytes(screen, client_remote_file(
-                1, b64, item_type=0, parent_handle=2, entry_num=2))
-            parse_bytes(screen, client_remote_file(
-                1, '', item_type=0, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, b64, item_type=0, parent_handle=2, entry_num=2))
+            parse_bytes(screen, client_remote_file(1, '', item_type=0, parent_handle=2, entry_num=2))
             self._assert_no_output(cap)
             self.assert_drag_data_complete(cap)
 
@@ -3071,6 +3215,7 @@ class TestDnDProtocol(BaseTest):
     def test_drag_notify_action_changed_colon_separator(self) -> None:
         """drag_notify ACTION_CHANGED output has proper colon separators."""
         from kitty.fast_data_types import GLFW_DRAG_OPERATION_MOVE
+
         with dnd_test_window() as (screen, cap):
             self._setup_drag_offer(screen, cap, 'text/plain')
             dnd_test_force_drag_dropped(cap.window_id)
@@ -3080,7 +3225,7 @@ class TestDnDProtocol(BaseTest):
             self.assertEqual(len(events), 1, events)
             self.ae(events[0]['type'], 'e')
             self.ae(events[0]['meta'].get('x'), '2')  # ACTION_CHANGED = type+1 = 2
-            self.ae(events[0]['meta'].get('o'), '2')   # MOVE = o=2
+            self.ae(events[0]['meta'].get('o'), '2')  # MOVE = o=2
 
     def test_drag_notify_finished_colon_separator(self) -> None:
         """drag_notify FINISHED output has proper colon separators."""
@@ -3093,7 +3238,7 @@ class TestDnDProtocol(BaseTest):
             self.assertEqual(len(events), 1, events)
             self.ae(events[0]['type'], 'e')
             self.ae(events[0]['meta'].get('x'), '4')  # FINISHED = type+1 = 4
-            self.ae(events[0]['meta'].get('y'), '0')   # was_canceled = 0
+            self.ae(events[0]['meta'].get('y'), '0')  # was_canceled = 0
 
     def test_remote_drag_children_freed_on_cleanup(self) -> None:
         """Remote drag with directories properly frees the children array on cleanup."""
@@ -3170,7 +3315,9 @@ class TestDnDProtocol(BaseTest):
         """A MIME type that exactly matches an accepted type is included in the result."""
         with dnd_test_window() as (screen, cap):
             result = dnd_test_drop_update_mimes(
-                cap.window_id, 1, 'text/html text/plain',
+                cap.window_id,
+                1,
+                'text/html text/plain',
                 ['text/html', 'text/plain', 'application/octet-stream'],
             )
             self.assertIn('text/html', result)
@@ -3186,7 +3333,9 @@ class TestDnDProtocol(BaseTest):
         """
         with dnd_test_window() as (screen, cap):
             result = dnd_test_drop_update_mimes(
-                cap.window_id, 1, 'text/html',
+                cap.window_id,
+                1,
+                'text/html',
                 ['text/h', 'text/html'],
             )
             # Only the exact match should survive
@@ -3199,7 +3348,9 @@ class TestDnDProtocol(BaseTest):
             # accepted buffer looks like: "text/html\0\0"
             # 'html' is a substring but not an entry
             result = dnd_test_drop_update_mimes(
-                cap.window_id, 1, 'text/html',
+                cap.window_id,
+                1,
+                'text/html',
                 ['html', 'text/html'],
             )
             self.assertNotIn('html', result, "'html' is a substring of 'text/html' and must not be accepted")
@@ -3210,17 +3361,20 @@ class TestDnDProtocol(BaseTest):
         with dnd_test_window() as (screen, cap):
             # Client accepts text/plain first, then text/html
             result = dnd_test_drop_update_mimes(
-                cap.window_id, 1, 'text/plain text/html',
+                cap.window_id,
+                1,
+                'text/plain text/html',
                 ['text/html', 'text/plain'],
             )
-            self.assertEqual(result, ['text/plain', 'text/html'],
-                             'accepted order (text/plain before text/html) must be preserved')
+            self.assertEqual(result, ['text/plain', 'text/html'], 'accepted order (text/plain before text/html) must be preserved')
 
     def test_drop_update_mimes_none_accepted(self) -> None:
         """When no offered MIME type is accepted, the result is empty."""
         with dnd_test_window() as (screen, cap):
             result = dnd_test_drop_update_mimes(
-                cap.window_id, 1, 'text/plain',
+                cap.window_id,
+                1,
+                'text/plain',
                 ['application/pdf', 'image/png'],
             )
             self.assertEqual(result, [])

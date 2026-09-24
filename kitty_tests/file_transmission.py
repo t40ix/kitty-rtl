@@ -16,7 +16,7 @@ from kitty.constants import kitten_exe
 from kitty.file_transmission import Action, Compression, FileTransmissionCommand, FileType, TransmissionType, ZlibDecompressor
 from kitty.file_transmission import TestFileTransmission as FileTransmission
 
-from . import PTY, BaseTest
+from .base import PTY, BaseTest
 
 
 def response(id='test', msg='', file_id='', name='', action='status', status='', size=-1):
@@ -59,7 +59,7 @@ def generate_data(block_size, num_blocks, *extra) -> bytes:
     for i in range(num_blocks):
         offset = i * block_size
         p = str(i).encode()
-        ans[offset:offset+len(p)] = p
+        ans[offset : offset + len(p)] = p
     return bytes(ans)
 
 
@@ -71,7 +71,7 @@ def patch_data(data, *patches):
         r = r.encode()
         total_patch_size += len(r)
         offset = int(o)
-        ans[offset:offset+len(r)] = r
+        ans[offset : offset + len(r)] = r
     return bytes(ans), len(patches), total_patch_size
 
 
@@ -96,6 +96,7 @@ def run_roundtrip_test(self: 'TestFileTransmission', src_data, changed, num_of_p
     del src, signature
     src = memoryview(src_data)
     delta = bytearray(0)
+
     def read_into(b):
         nonlocal src
         n = min(len(b), len(src))
@@ -103,8 +104,10 @@ def run_roundtrip_test(self: 'TestFileTransmission', src_data, changed, num_of_p
             b[:n] = src[:n]
             src = src[n:]
         return n
+
     def write_delta(b):
         delta.extend(b)
+
     while d.next_op(read_into, write_delta):
         pass
     delta = memoryview(delta)
@@ -123,6 +126,7 @@ def run_roundtrip_test(self: 'TestFileTransmission', src_data, changed, num_of_p
 
     def debug_msg():
         return f'\n\nsrc:\n{src_data.decode()}\nchanged:\n{changed.decode()}\noutput:\n{output.decode()}'
+
     try:
         while delta:
             p.apply_delta_data(delta[:11], read_at, write_changes)
@@ -133,32 +137,30 @@ def run_roundtrip_test(self: 'TestFileTransmission', src_data, changed, num_of_p
     self.assertEqual(src_data, bytes(output), debug_msg())
     limit = 2 * (p.block_size * num_of_patches)
     if limit > -1:
-        self.assertLessEqual(
-            p.total_data_in_delta, limit, f'Unexpectedly poor delta performance: {total_patch_size=} {p.total_data_in_delta=} {limit=}')
+        self.assertLessEqual(p.total_data_in_delta, limit, f'Unexpectedly poor delta performance: {total_patch_size=} {p.total_data_in_delta=} {limit=}')
 
 
 def test_rsync_roundtrip(self: 'TestFileTransmission') -> None:
     block_size = 16
     src_data = generate_data(block_size, 16)
-    changed, num_of_patches, total_patch_size = patch_data(src_data, "3:patch1", "16:patch2", "130:ptch3", "176:patch4", "222:XXYY")
+    changed, num_of_patches, total_patch_size = patch_data(src_data, '3:patch1', '16:patch2', '130:ptch3', '176:patch4', '222:XXYY')
 
     run_roundtrip_test(self, src_data, src_data[block_size:], 1, block_size)
     run_roundtrip_test(self, src_data, changed, num_of_patches, total_patch_size)
     run_roundtrip_test(self, src_data, b'', -1, 0)
     run_roundtrip_test(self, src_data, src_data, 0, 0)
-    run_roundtrip_test(self, src_data, changed[:len(changed)-3], num_of_patches, total_patch_size)
+    run_roundtrip_test(self, src_data, changed[: len(changed) - 3], num_of_patches, total_patch_size)
     run_roundtrip_test(self, src_data, changed[:37] + changed[81:], num_of_patches, total_patch_size)
 
     block_size = 13
-    src_data = generate_data(block_size, 17, "trailer")
-    changed, num_of_patches, total_patch_size = patch_data(src_data, "0:patch1", "19:patch2")
+    src_data = generate_data(block_size, 17, 'trailer')
+    changed, num_of_patches, total_patch_size = patch_data(src_data, '0:patch1', '19:patch2')
     run_roundtrip_test(self, src_data, changed, num_of_patches, total_patch_size)
-    run_roundtrip_test(self, src_data, changed[:len(changed)-3], num_of_patches, total_patch_size)
-    run_roundtrip_test(self, src_data, changed + b"xyz...", num_of_patches, total_patch_size)
+    run_roundtrip_test(self, src_data, changed[: len(changed) - 3], num_of_patches, total_patch_size)
+    run_roundtrip_test(self, src_data, changed + b'xyz...', num_of_patches, total_patch_size)
 
 
 class PtyFileTransmission(FileTransmission):
-
     def __init__(self, pty, allow=True):
         self.pty = pty
         super().__init__(allow=allow)
@@ -171,14 +173,12 @@ class PtyFileTransmission(FileTransmission):
 
 
 class TransferPTY(PTY):
-
     def __init__(self, cmd, cwd, allow=True, env=None):
         super().__init__(cmd, cwd=cwd, env=env, rows=200, columns=120)
         self.fc = PtyFileTransmission(self, allow=allow)
 
 
 class TestFileTransmission(BaseTest):
-
     def setUp(self):
         self.direction_receive = False
         self.kitty_home = self.kitty_cwd = self.kitten_home = self.kitten_cwd = ''
@@ -209,6 +209,7 @@ class TestFileTransmission(BaseTest):
         def f(r):
             r.pop('size', None)
             return r
+
         a = tuple(f(r) for r in a if r.get('status') != 'PROGRESS')
         b = tuple(f(r) for r in b if r.get('status') != 'PROGRESS')
         self.ae(a, b)
@@ -224,6 +225,112 @@ class TestFileTransmission(BaseTest):
 
     def test_rsync_roundtrip(self):
         test_rsync_roundtrip(self)
+
+    def test_file_put_differential(self):
+        from kitty.file_transmission import PatchFile
+
+        def start_receiving():
+            ft = FileTransmission()
+            ft.handle_serialized_command(serialized_cmd(action='send'))
+            ft.test_responses = []
+            return ft
+
+        def started_ttype(ft):
+            q = [r for r in ft.test_responses if r.get('status') == 'STARTED']
+            self.ae(len(q), 1)
+            return q[0].get('ttype', 'simple')
+
+        def signature_sent(ft):
+            return b''.join(r['data'] for r in ft.test_responses if r.get('action') == 'data' and r.get('data'))
+
+        base = os.path.join(self.tdir, 'diff')
+        os.mkdir(base)
+
+        # a differential transfer to a plain regular file works as usual
+        dest = os.path.join(base, 'f.bin')
+        before = b'hello world ' * 5000
+        after = (b'hello world ' * 4000) + (b'goodbye!' * 2000)
+        with open(dest, 'wb') as f:
+            f.write(before)
+        ft = start_receiving()
+        ft.handle_serialized_command(serialized_cmd(action='file', file_id='r', name=dest, ftype='regular', ttype='rsync'))
+        self.ae(started_ttype(ft), 'rsync')
+        d = Differ()
+        d.add_signature_data(signature_sent(ft))
+        d.finish_signature_data()
+        src = memoryview(after)
+        delta = bytearray()
+
+        def read_into(b):
+            nonlocal src
+            n = min(len(b), len(src))
+            b[:n] = src[:n]
+            src = src[n:]
+            return n
+
+        while d.next_op(read_into, delta.extend):
+            pass
+        chunks = memoryview(bytes(delta))
+        while len(chunks) > 4096:
+            ft.handle_serialized_command(serialized_cmd(action='data', file_id='r', data=bytes(chunks[:4096])))
+            chunks = chunks[4096:]
+        ft.handle_serialized_command(serialized_cmd(action='end_data', file_id='r', data=bytes(chunks)))
+        with open(dest, 'rb') as f:
+            self.ae(f.read(), after)
+        self.ae(sorted(names_in(base)), ['f.bin'])
+
+        # a sender must not be able to use a differential transfer to read
+        # through a symlink it plants at the destination in the same transfer
+        secret_dir = os.path.join(base, 'secret')
+        os.mkdir(secret_dir)
+        secret = os.path.join(secret_dir, 'secret.txt')
+        secret_data = b'super secret data' * 1000
+        with open(secret, 'wb') as f:
+            f.write(secret_data)
+        sdest = os.path.join(base, 'innocent.bin')
+        ft = start_receiving()
+        ft.handle_serialized_command(serialized_cmd(action='file', file_id='s', name=sdest, ftype='symlink'))
+        ft.handle_serialized_command(serialized_cmd(action='end_data', file_id='s', data='path:' + secret))
+        self.assertTrue(os.path.islink(sdest))
+        ft.test_responses = []
+        ft.handle_serialized_command(serialized_cmd(action='file', file_id='r', name=sdest, ftype='regular', ttype='rsync'))
+        self.ae(started_ttype(ft), 'simple')
+        self.ae(signature_sent(ft), b'')
+        ft.handle_serialized_command(serialized_cmd(action='end_data', file_id='r', data='replacement'))
+        self.assertFalse(os.path.islink(sdest))
+        with open(sdest, 'rb') as f:
+            self.ae(f.read(), b'replacement')
+        with open(secret, 'rb') as f:
+            self.ae(f.read(), secret_data)
+        self.ae(sorted(names_in(secret_dir)), ['secret.txt'])
+
+        # likewise for a destination with more than one link to it
+        hdest = os.path.join(base, 'hard.bin')
+        other = os.path.join(base, 'other.bin')
+        with open(hdest, 'wb') as f:
+            f.write(b'original')
+        os.link(hdest, other)
+        ft = start_receiving()
+        ft.handle_serialized_command(serialized_cmd(action='file', file_id='r', name=hdest, ftype='regular', ttype='rsync'))
+        self.ae(started_ttype(ft), 'simple')
+        self.ae(signature_sent(ft), b'')
+        ft.handle_serialized_command(serialized_cmd(action='end_data', file_id='r', data='replacement'))
+        with open(other, 'rb') as f:
+            self.ae(f.read(), b'original')
+
+        # and PatchFile itself must never follow a symlink, in case the
+        # destination is swapped after it is created but before it is read
+        pf = PatchFile(sdest, len(secret_data))
+        os.remove(sdest)
+        os.symlink(secret, sdest)
+        with self.assertRaises(OSError):
+            pf.next_signature_block(memoryview(bytearray(64)))
+        # its temporary file goes next to the destination, not next to the
+        # symlink target
+        tf = pf.dest_file
+        tf.close()
+        self.assertPathEqual(os.path.dirname(tf.name), base)
+        os.remove(tf.name)
 
     def test_file_get(self):
         # send refusal
@@ -320,11 +427,11 @@ class TestFileTransmission(BaseTest):
         t('a1=b1;c=d;;;1=1', 'a1', 'b1', 'c', 'd', '1', '1')
 
     def test_rsync_hashers(self):
-        h = Hasher("xxh3-64")
+        h = Hasher('xxh3-64')
         h.update(b'abcd')
         self.assertEqual(h.hexdigest(), '6497a96f53a89890')
         self.assertEqual(h.digest64(), 7248448420886124688)
-        h128 = Hasher("xxh3-128")
+        h128 = Hasher('xxh3-128')
         h128.update(b'abcd')
         self.assertEqual(h128.hexdigest(), '8d6b60383dfa90c21be79eecd1b1353d')
 
@@ -399,9 +506,9 @@ class TestFileTransmission(BaseTest):
             os.link(f.name, b / 'hardlink')
             os.utime(f.name, (1.3, 1.3))
             se(f.name)
-            se(str(b/'hardlink'))
+            se(str(b / 'hardlink'))
             os.mkdir(b / 'empty')
-            se(str(b/'empty'))
+            se(str(b / 'empty'))
             s = b / 'sub'
             os.mkdir(s)
             with open(s / 'reg', 'wb') as f:
@@ -409,17 +516,18 @@ class TestFileTransmission(BaseTest):
             os.utime(f.name, (1171.3, 1171.3))
             se(f.name)
             se(str(s))
-            os.symlink('/', b/'abssym')
-            os.utime(b/'abssym', (1234.5, 1234.5), follow_symlinks=False)
-            se(b/'abssym')
-            os.symlink('sub/reg', b/'sym')
-            os.utime(b/'sym', (6789.1, 6789.1), follow_symlinks=False)
-            se(b/'sym')
+            os.symlink('/', b / 'abssym')
+            os.utime(b / 'abssym', (1234.5, 1234.5), follow_symlinks=False)
+            se(b / 'abssym')
+            os.symlink('sub/reg', b / 'sym')
+            os.utime(b / 'sym', (6789.1, 6789.1), follow_symlinks=False)
+            se(b / 'sym')
 
             with self.run_kitten(list(cmd) + [src, dest]) as pty:
                 pty.wait_till_child_exits(require_exit_code=0)
 
             actual = {}
+
             def de(path):
                 e = entry(path, os.path.join(dest, os.path.basename(src)))
                 if e.relpath != '.':

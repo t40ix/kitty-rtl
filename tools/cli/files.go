@@ -4,7 +4,6 @@ package cli
 
 import (
 	"fmt"
-	"mime"
 	"os"
 	"path/filepath"
 	"slices"
@@ -65,7 +64,7 @@ func CompleteFiles(prefix string, callback func(*FileEntry), cwd string) error {
 			joinable_prefix = prefix
 		} else {
 			idx := strings.LastIndex(prefix, utils.Sep)
-			if idx > 0 {
+			if idx > -1 {
 				joinable_prefix = prefix[:idx+1]
 				base_dir = filepath.Dir(location)
 			}
@@ -124,8 +123,13 @@ func CompleteExecutablesInPath(prefix string, paths ...string) []string {
 		entries, err := os.ReadDir(dir)
 		if err == nil {
 			for _, e := range entries {
-				if strings.HasPrefix(e.Name(), prefix) && !e.IsDir() && unix.Access(filepath.Join(dir, e.Name()), unix.X_OK) == nil {
-					ans = append(ans, e.Name())
+				if strings.HasPrefix(e.Name(), prefix) {
+					// A symlink to a directory has IsDir() false but still passes the X_OK
+					// check, since directories are executable in the access(2) sense.
+					p := filepath.Join(dir, e.Name())
+					if unix.Access(p, unix.X_OK) == nil && !is_dir_or_symlink_to_dir(e, p) {
+						ans = append(ans, e.Name())
+					}
 				}
 			}
 		}
@@ -156,7 +160,7 @@ func fname_based_completer(prefix, cwd string, is_match func(string) bool) []str
 			entries, err := os.ReadDir(entry.Abspath)
 			if err == nil {
 				for _, e := range entries {
-					if is_match(e.Name()) || is_dir_or_symlink_to_dir(e, filepath.Join(entry.Abspath, e.Name())) {
+					if is_match(strings.ToLower(e.Name())) || is_dir_or_symlink_to_dir(e, filepath.Join(entry.Abspath, e.Name())) {
 						ans = append(ans, entry.CompletionCandidate)
 						return
 					}
@@ -191,16 +195,7 @@ func complete_by_mimepat(prefix, cwd string, patterns []string) []string {
 		if all_allowed {
 			return true
 		}
-		idx := strings.Index(name, ".")
-		if idx < 1 {
-			return false
-		}
-		ext := name[idx:]
-		mt := mime.TypeByExtension(ext)
-		if mt == "" {
-			ext = filepath.Ext(name)
-			mt = mime.TypeByExtension(ext)
-		}
+		mt := utils.GuessMimeType(name)
 		if mt == "" {
 			return false
 		}
@@ -320,7 +315,7 @@ func DirectoryCompleter(title string, relative_to relative_to) CompletionFunc {
 		mg.NoTrailingSpace = true
 		mg.IsFiles = true
 		_ = CompleteFiles(word, func(entry *FileEntry) {
-			if entry.Mode.IsDir() {
+			if entry.IsDir {
 				mg.AddMatch(entry.CompletionCandidate)
 			}
 		}, cwd)

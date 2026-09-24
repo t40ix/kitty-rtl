@@ -47,6 +47,9 @@ load_glfw(const char* path) {
     *(void **) (&glfwSetIMECursorPositionCallback_impl) = dlsym(handle, "glfwSetIMECursorPositionCallback");
     if (glfwSetIMECursorPositionCallback_impl == NULL) fail("Failed to load glfw function glfwSetIMECursorPositionCallback with error: %s", dlerror());
 
+    *(void **) (&glfwSetIMETextAroundCursorCallback_impl) = dlsym(handle, "glfwSetIMETextAroundCursorCallback");
+    if (glfwSetIMETextAroundCursorCallback_impl == NULL) fail("Failed to load glfw function glfwSetIMETextAroundCursorCallback with error: %s", dlerror());
+
     *(void **) (&glfwIsLayerShellSupported_impl) = dlsym(handle, "glfwIsLayerShellSupported");
     if (glfwIsLayerShellSupported_impl == NULL) fail("Failed to load glfw function glfwIsLayerShellSupported with error: %s", dlerror());
 
@@ -293,6 +296,9 @@ load_glfw(const char* path) {
     *(void **) (&glfwSetIgnoreOSKeyboardProcessing_impl) = dlsym(handle, "glfwSetIgnoreOSKeyboardProcessing");
     if (glfwSetIgnoreOSKeyboardProcessing_impl == NULL) fail("Failed to load glfw function glfwSetIgnoreOSKeyboardProcessing with error: %s", dlerror());
 
+    *(void **) (&glfwSetModifierRemap_impl) = dlsym(handle, "glfwSetModifierRemap");
+    if (glfwSetModifierRemap_impl == NULL) fail("Failed to load glfw function glfwSetModifierRemap with error: %s", dlerror());
+
     *(void **) (&glfwGrabKeyboard_impl) = dlsym(handle, "glfwGrabKeyboard");
     if (glfwGrabKeyboard_impl == NULL) fail("Failed to load glfw function glfwGrabKeyboard with error: %s", dlerror());
 
@@ -503,6 +509,9 @@ load_glfw(const char* path) {
     *(void **) (&glfwCocoaRegisterMIMETypes_impl) = dlsym(handle, "glfwCocoaRegisterMIMETypes");
     if (glfwCocoaRegisterMIMETypes_impl == NULL) dlerror(); // clear error indicator
 
+    *(void **) (&glfwCocoaPreserveDroppedFilePromises_impl) = dlsym(handle, "glfwCocoaPreserveDroppedFilePromises");
+    if (glfwCocoaPreserveDroppedFilePromises_impl == NULL) dlerror(); // clear error indicator
+
     *(void **) (&glfwCocoaSetWindowLevel_impl) = dlsym(handle, "glfwCocoaSetWindowLevel");
     if (glfwCocoaSetWindowLevel_impl == NULL) dlerror(); // clear error indicator
 
@@ -559,6 +568,18 @@ load_glfw(const char* path) {
 
     *(void **) (&glfwSetX11LaunchCommand_impl) = dlsym(handle, "glfwSetX11LaunchCommand");
     if (glfwSetX11LaunchCommand_impl == NULL) dlerror(); // clear error indicator
+
+    *(void **) (&glfwWaylandCreateVirtualDevices_impl) = dlsym(handle, "glfwWaylandCreateVirtualDevices");
+    if (glfwWaylandCreateVirtualDevices_impl == NULL) dlerror(); // clear error indicator
+
+    *(void **) (&glfwWaylandInjectMouseMotionAbsolute_impl) = dlsym(handle, "glfwWaylandInjectMouseMotionAbsolute");
+    if (glfwWaylandInjectMouseMotionAbsolute_impl == NULL) dlerror(); // clear error indicator
+
+    *(void **) (&glfwWaylandInjectMouseButton_impl) = dlsym(handle, "glfwWaylandInjectMouseButton");
+    if (glfwWaylandInjectMouseButton_impl == NULL) dlerror(); // clear error indicator
+
+    *(void **) (&glfwWaylandInjectKey_impl) = dlsym(handle, "glfwWaylandInjectKey");
+    if (glfwWaylandInjectKey_impl == NULL) dlerror(); // clear error indicator
 
     return NULL;
 }

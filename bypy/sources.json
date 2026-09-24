@@ -30,10 +30,10 @@
     },
 
     {
-        "name": "openssl 3.5.7",
+        "name": "openssl 3.5.8",
         "unix": {
             "file_extension": "tar.gz",
-            "hash": "sha256:a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8",
+            "hash": "sha256:a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2",
             "urls": ["https://www.openssl.org/source/{filename}"]
         }
     },
@@ -59,10 +59,10 @@
     },
 
     {
-        "name": "libxml2 2.15.3",
+        "name": "libxml2 2.15.4",
         "unix": {
             "file_extension": "tar.xz",
-            "hash": "sha256:78262a6e7ac170d6528ebfe2efccdf220191a5af6a6cd61ea4a9a9a5042c7a07",
+            "hash": "sha256:98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821",
             "urls": ["https://download.gnome.org/sources/libxml2/{version_except_last}/{filename}"]
         }
     },
@@ -145,10 +145,10 @@
     },
 
     {
-        "name": "python 3.14.6",
+        "name": "python 3.14.7",
         "unix": {
             "file_extension": "tar.xz",
-            "hash": "sha256:143b1dddefaec3bd2e21e3b839b34a2b7fb9842272883c576420d605e9f30c63",
+            "hash": "sha256:3b48dac8fb59f62eaa67ac83c1eb12bda1b7a08406dd286e252c11a66be27f81",
             "urls": ["https://www.python.org/ftp/python/{version}/Python-{version}.{file_extension}"]
         }
     },
@@ -280,21 +280,30 @@
     },
 
     {
-        "name": "wayland 1.24.0",
+        "name": "slang 2026.14.1",
+        "unix": {
+            "file_extension": "tar.gz",
+            "hash": "sha256:20254026c218ac100ecd118c033f2843e11282152d0d2b6a6b744735674c40ea",
+            "urls": ["git-submodules://github.com/shader-slang/slang.git"]
+        }
+    },
+
+    {
+        "name": "wayland 1.26.0",
         "os": "linux",
         "unix": {
             "file_extension": "tar.xz",
-            "hash": "sha256:82892487a01ad67b334eca83b54317a7c86a03a89cfadacfef5211f11a5d0536",
+            "hash": "sha256:64176eaa46e4969903e286f8e5ef8331affc17fdf03ac9b58381d2b23162b7a3",
             "urls": ["https://gitlab.freedesktop.org/wayland/wayland/-/releases/{version}/downloads/{filename}"]
         }
     },
 
     {
-        "name": "wayland-protocols 1.45",
+        "name": "wayland-protocols 1.49",
         "os": "linux",
         "unix": {
             "file_extension": "tar.xz",
-            "hash": "sha256:4d2b2a9e3e099d017dc8107bf1c334d27bb87d9e4aff19a0c8d856d17cd41ef0",
+            "hash": "sha256:ec4c8f74942d6dff7ace8b4ce4764f0ef9ff618a935d974ea77edee2ad240b14",
             "urls": ["https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/{version}/downloads/{filename}"]
         }
     }

@@ -313,6 +313,7 @@ opt(
     'text_fg_override_threshold',
     '0',
     option_type='text_fg_override_threshold',
+    ctype='text_fg_override_threshold',
     long_text="""
 A setting to prevent low contrast between foreground and background colors.
 Useful when working with applications that use colors that do not contrast
@@ -456,7 +457,8 @@ trail animation only follows cursors that have stayed in their position for long
 than the specified number of milliseconds. This prevents trails from appearing
 for cursors that rapidly change their positions during UI updates in complex applications.
 See :opt:`cursor_trail_decay` to control the animation speed and :opt:`cursor_trail_start_threshold`
-to control when a cursor trail is started.
+to control when a cursor trail is started. You can also have different styles of trail by
+using the :opt:`custom_shaders` option, for example: :code:`custom_shaders cursor-trail-blaze`.
 """,
 )
 
@@ -530,7 +532,7 @@ opt(
     'scrollbar',
     'scrolled',
     ctype='scrollbar',
-    choices=('scrolled', 'always', 'never', 'hovered', 'scrolled-and-hovered'),
+    choices=('scrolled', 'always', 'never', 'hovered', 'scrolled-and-hovered', 'scrolled-or-hovered'),
     long_text="""\
 Control when the scrollbar is displayed.
 
@@ -540,6 +542,8 @@ Control when the scrollbar is displayed.
     means when the mouse is hovering on the right edge of the window.
 :code:`scrolled-and-hovered`
     means when the mouse is over the scrollbar region *and* scrolling backwards has started.
+:code:`scrolled-or-hovered`
+    means when the mouse is over the scrollbar region *or* scrolling backwards has started.
 :code:`always`
     means whenever any scrollback is present
 :code:`never`
@@ -1158,7 +1162,9 @@ opt(
     long_text="""
 The threshold distance the mouse must move to start a drag and drop. Dragging
 works for tabs and windows. You can drag tabs to re-order them, detach
-them into new OS Windows or move them to another OS Window. Similarly,
+them into new OS Windows or move them to another OS Window. A tab with a single
+window can also be dropped into another tab's content area to insert that window
+at the highlighted edge, within the same kitty process. Similarly,
 by dragging the titlebar of a window (see :ac:`toggle_window_title_bars`)
 you can re-order it in its layout, detach it or move it to another tab.
 A value of zero disables all dragging.
@@ -1273,10 +1279,39 @@ mma(
     'Start selecting text',
     'start_simple_selection left press ungrabbed mouse_selection normal',
     long_text="""
-If you would like to drag and drop hyperlinks or detected URLs, instead of
-:code:`normal` use :code:`drag_or_normal_select`, then if a hyperlink is under
-the mouse it will be dragged based on :opt:`drag_threshold` otherwise a normal
-selection will be performed.
+By default, pressing the left mouse button starts a new selection. To enable
+dragging selected text, hyperlinks or detected URLs, add this to :file:`kitty.conf`::
+
+    mouse_map left press ungrabbed mouse_selection drag_or_normal_select
+
+After saving, use :sc:`reload_config_file` if :opt:`auto_reload_config` is disabled.
+Select some text and release the mouse button. Then press inside the selection
+and drag it to another kitty window (including a split) or an application that
+accepts text drops. The text is copied without changing the clipboard.
+
+For programs that capture mouse events, such as editors with mouse support,
+also add the following mapping and hold :kbd:`Shift` when selecting and dragging::
+
+    mouse_map shift+left press grabbed mouse_selection drag_or_normal_select
+
+To require :kbd:`Ctrl` for dragging, use these mappings instead of the first
+example, keeping ordinary left-button selection unchanged::
+
+    mouse_map left press ungrabbed mouse_selection normal
+    mouse_map ctrl+left press ungrabbed mouse_selection drag_or_normal_select
+
+To disable text and link dragging, replace :code:`drag_or_normal_select` with
+:code:`normal` in the mappings you added. Setting :opt:`drag_threshold` to zero
+also disables dragging, but affects tab and window dragging as well.
+
+Dragging starts after the mouse has moved farther than :opt:`drag_threshold`.
+The selection takes precedence over links under the mouse. Outside a selection,
+links can be dragged as before, and other text can be selected normally. A click
+inside the selection clears it, while double and triple clicks still select
+words and lines.
+
+Drops into kitty follow the receiving window's :opt:`paste_actions` settings.
+Multiline text or text containing control codes can therefore require confirmation.
 """,
 )
 
@@ -1570,7 +1605,7 @@ opt(
     'yes',
     option_type='to_bool',
     long_text="""
-If enabled, the :term:`OS Window <os_window>` size will be remembered so that
+If enabled, the :term:`OS Window <os_window>` size and maximize state will be remembered so that
 new instances of kitty will have the same size as the previous instance.
 If disabled, the :term:`OS Window <os_window>` will initially have size
 configured by initial_window_width/height, in pixels. You can use a suffix of
@@ -1662,6 +1697,20 @@ drawn.
 )
 
 opt(
+    'window_border_radius',
+    '0',
+    option_type='window_border_width',
+    long_text="""
+The corner radius of window borders. Can be either in pixels (px) or pts (pt).
+Values in pts will be rounded to the nearest number of pixels based on screen
+resolution. If not specified, the unit is assumed to be pts. A value of zero
+disables rounded borders. This option applies only when full window borders are
+drawn; it has no effect with minimal borders. Rounded borders are drawn over
+corner cells, so use :opt:`window_padding_width` to keep text clear of them.
+""",
+)
+
+opt(
     'draw_window_borders_for_single_window',
     'no',
     option_type='to_bool',
@@ -1742,6 +1791,25 @@ The value can be one of: :code:`top-left`, :code:`top`, :code:`top-right`,
 )
 
 opt(
+    'padding_fill_strategy',
+    'background',
+    choices=('background', 'neighboring_cell'),
+    ctype='padding_fill_strategy',
+    long_text="""
+When the window size is not an exact multiple of the cell size, thin strips of
+compensatory padding are added at the window edges (see
+:opt:`placement_strategy`). This option controls how those strips are colored.
+:code:`neighboring_cell` colors each strip to match the
+background color of the cell adjacent to it, which looks best with full screen
+applications such as editors that have differently colored border cells. A value
+of :code:`background` colors the strips using the window background
+color. Note that this only affects the compensatory padding, the intentional
+padding from :opt:`window_padding_width` is always drawn using the background
+color.
+""",
+)
+
+opt(
     'active_border_color',
     '#00ff00',
     option_type='to_color_or_none',
@@ -1768,14 +1836,15 @@ opt(
     option_type='signed_unit_float',
     ctype='float',
     long_text="""
-Fade the text in inactive windows by the specified amount. This must be a
+Fade the content in inactive windows by the specified amount. This must be a
 number between -1 and 1. The absolute value controls the actual
 opacity, with zero being fully faded and one being fully opaque. When a positive number is
 used the text is faded even if only a single window is visible when the OS window
 is not focused. Negative numbers means that text is only faded when more than one kitty window
 is visible in an OS Window. Fading happens in all but the active window, even if the OS Window
 is not focused. Thus this is useful if you want to rely on the window manager to indicate OS Window focus
-and this feature to indicate which kitty window is active insidethe OS Window.
+and this feature to indicate which kitty window is active inside the OS Window. For alternate dimming/highlighting
+strategies, you can use :opt:`custom_shaders` for example: :code:`custom_shaders dim-inactive-windows`.
 """,
 )
 
@@ -2210,6 +2279,48 @@ The maximum number of cells that can be used to render the text in a tab.
 A value of zero means that no limit is applied. For vertical tab bars, kitty
 uses a default sidebar width sized for about twenty title cells when this is
 left unset.
+""",
+)
+
+opt(
+    'tab_title_max_lines',
+    '1',
+    option_type='positive_int',
+    long_text="""
+The maximum number of lines each tab may occupy, for vertical tab bars only
+(see :opt:`tab_bar_edge`). Titles containing newlines are rendered over
+multiple lines, up to this limit; any remaining lines are dropped. A value of
+:code:`1` (the default) keeps every tab on a single line, so newlines in
+:opt:`tab_title_template` have no effect. Increase it to make room for
+multi-line titles, for example::
+
+    tab_title_max_lines 2
+    tab_title_template "{index}: {tab.active_exe}\\n{title}"
+
+Note that tabs are packed according to the number of lines each title actually
+uses, so a tab with a single-line title still occupies only one line even when
+this is greater than one.
+""",
+)
+
+opt(
+    'tab_title_wrap',
+    'no',
+    option_type='tab_title_wrap',
+    long_text="""
+Wrap tab titles that are too long to fit instead of truncating them, for
+vertical tab bars only (see :opt:`tab_bar_edge`). Can be :code:`no` (the
+default) to truncate with an ellipsis as before, :code:`yes` to wrap at the
+width of the tab bar, or a number to wrap at that many cells, for example::
+
+    tab_title_wrap yes
+    tab_title_wrap 20
+
+Wrapping is limited by :opt:`tab_title_max_lines`, so it has no visible effect
+while that is :code:`1`. When a title needs more lines than are allowed, the
+last line it is given is truncated with an ellipsis. Explicit newlines in
+:opt:`tab_title_template` still start a new line, and each of the resulting
+lines is wrapped independently.
 """,
 )
 
@@ -2842,6 +2953,20 @@ they will override any variables set by other :opt:`env` directives.
 )
 
 opt(
+    'custom_shaders',
+    '',
+    option_type='custom_shaders',
+    add_to_default=False,
+    long_text="""
+Space separated list of custom shader pipeline names. If multiple names are specified they are
+loaded in order and concatenated. You can use shell syntax to quote or escape space characters.
+The exact loading algorithm is described in :ref:`custom_shader_load_order`.
+See :doc:`/custom-shaders` for details on how custom shaders work. For a quick demo, try setting
+this to :code:`inside-the-matrix`.
+    """,
+)
+
+opt(
     '+filter_notification',
     '',
     option_type='filter_notification',
@@ -2977,7 +3102,9 @@ opt(
     long_text="""
 The maximum size (in MB) of data from programs running in kitty that will be
 stored for writing to the system clipboard. A value of zero means no size limit
-is applied. See also :opt:`clipboard_control`.
+is applied. Programs using the :doc:`clipboard protocol <clipboard>` that try to
+write more data than this are sent an ``EFBIG`` error and their data is
+discarded. See also :opt:`clipboard_control`.
 """,
 )
 
@@ -3368,7 +3495,8 @@ window. A value of :code:`menubar` will show the title of the currently active
 window in the macOS global menu bar, making use of otherwise wasted space. A
 value of :code:`all` will show the title in both places, and :code:`none` hides
 the title. See :opt:`macos_menubar_title_max_length` for how to control the
-length of the title in the menu bar.
+length of the title in the menu bar. Note that when displaying the title in the
+menubar it is prefixed by :code:`::` as a separator which cannot be changed.
 """,
 )
 
@@ -3487,6 +3615,69 @@ opt(
     long_text="""
 Special modifier key alias for default shortcuts. You can change the value of
 this option to alter all default shortcuts that use :opt:`kitty_mod`.
+""",
+)
+
+opt(
+    'remap_modifiers',
+    '',
+    option_type='remap_modifiers',
+    ctype='!remap_modifiers',
+    add_to_default=False,
+    long_text="""
+Remap modifiers, making one modifier act as another. The syntax is::
+
+    remap_modifiers <from>:<to> <from>:<to> ...
+
+for example :code:`remap_modifiers ctrl:super` makes every :kbd:`Ctrl+key` press
+arrive as :kbd:`Super+key`. Only :code:`shift`, :code:`alt`, :code:`ctrl`,
+:code:`super`, :code:`hyper` and :code:`meta` can be named. The source must be
+exactly one modifier; the destination may name more than one, in which case
+holding the source is indistinguishable from holding all of them.
+
+To swap two modifiers, specify remap rules for both, for example, to swap ctrl and super::
+
+    remap_modifiers ctrl:super super:ctrl
+
+Ordering among :opt:`remap_modifiers` items matters only in that the last item for
+a given source wins.
+
+The remapping happens before anything else looks at the event, so it is
+application wide: kitty's own keyboard shortcuts, :opt:`kitty_mod`,
+:code:`mouse_map` and the keys sent to the program running in the terminal all
+see the remapped modifier. Every mapping in :file:`kitty.conf` is therefore
+written in terms of the modifier a key *becomes*, not the one printed on the
+keycap — including the built-in shortcuts, so :code:`remap_modifiers ctrl super`
+moves every default :code:`ctrl+shift+…` binding onto the physical Super key
+unless you also change :opt:`kitty_mod`.
+
+A modifier key's own press and release are remapped too, so that a program using
+the full keyboard protocol does not see, for example, ctrl reported together with
+the Hyper key. That is only possible when the destination is a single modifier;
+with a multi-modifier destination the key itself keeps its original identity.
+
+On macOS, a menu bar accelerator is shown on the physical key that now produces
+the modifier it was declared with. Where no such key exists — because more than
+one modifier maps onto it, or because it maps to hyper or meta, which the macOS
+menu bar cannot express — the accelerator is left off the menu rather than shown
+incorrectly. The shortcut itself continues to work.
+
+On macOS the remap is applied before the key event reaches the text input
+system, so :kbd:`Option`, which produces text natively unless
+:opt:`macos_option_as_alt` is set, behaves consistently with the modifiers it
+reports. A destination of :kbd:`hyper` or :kbd:`meta` cannot be expressed in
+Cocoa's modifier flags, so such a remap is left unapplied there rather than
+silently losing the modifier.
+
+On Wayland, kitty only detects the :kbd:`hyper` and :kbd:`meta` modifiers when
+:envvar:`KITTY_WAYLAND_DETECT_MODIFIERS` is set in the environment. Without it
+those two never appear on key events at all, so remapping to or from them has
+nothing to act on there.
+
+This is useful for keyboard layouts that move Control somewhere more comfortable
+— for example placing a Hyper key on Caps Lock to use for readline and TUI
+editing, while leaving the physical Control key free for GUI-style shortcuts.
+Use :code:`kitty --debug-input` to see the remapping applied to each event.
 """,
 )
 

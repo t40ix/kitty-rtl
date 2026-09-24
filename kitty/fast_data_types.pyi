@@ -15,6 +15,7 @@ from kitty.typing_compat import EdgeLiteral, NotRequired, ReadableBuffer, Writea
 # Constants {{{
 SCALE_BITS: int
 NULL_COLOR_VALUE: int
+DEVELOP_ROOT: str
 WIDTH_BITS: int
 SUBSCALE_BITS: int
 COLOR_IS_SPECIAL: int
@@ -47,9 +48,11 @@ CLD_STOPPED: int
 CLD_CONTINUED: int
 CLD_EXITED: int
 SHM_NAME_MAX: int
+MAX_CUSTOM_SHADER_GROUPS: int
 MOUSE_SELECTION_LINE: int
 MOUSE_SELECTION_EXTEND: int
 MOUSE_SELECTION_NORMAL: int
+MOUSE_SELECTION_DRAG_OR_NORMAL_SELECT: int
 MOUSE_SELECTION_WORD: int
 MOUSE_SELECTION_RECTANGLE: int
 MOUSE_SELECTION_LINE_FROM_BEGIN: int
@@ -279,8 +282,12 @@ CURSOR_HOLLOW: int
 NO_CURSOR_SHAPE: int
 CURSOR_UNDERLINE: int
 DECAWM: int
+LNM: int
+ANIMATION_SAMPLE_WAIT: int
 BGIMAGE_PROGRAM: int
 CELL_PROGRAM: int
+PADDING_PROGRAM: int
+CUSTOM_END_PROGRAM: int
 CELL_FG_PROGRAM: int
 CELL_BG_PROGRAM: int
 BLIT_PROGRAM: int
@@ -352,6 +359,12 @@ def log_error_string(s: str) -> None:
 
 def glfw_get_key_name(key: int, native_key: int) -> Optional[str]:
     pass
+
+def glfw_wayland_inject_init(path_to_module: str, wayland_display: str) -> None: ...
+def glfw_wayland_inject_terminate() -> None: ...
+def glfw_wayland_inject_mouse_motion_absolute(x: int, y: int, x_extent: int, y_extent: int) -> None: ...
+def glfw_wayland_inject_mouse_button(button: int, action: int) -> None: ...
+def glfw_wayland_inject_key(key: int, action: int, mods: int = 0) -> None: ...
 
 StartupCtx = NewType('StartupCtx', int)
 Display = NewType('Display', int)
@@ -433,6 +446,10 @@ def fc_match_postscript_name(postscript_name: str) -> FontConfigPattern:
     pass
 
 def add_font_file(path: str) -> bool: ...
+def clear_fallback_font_cache() -> None: ...
+def fc_match_fallback(
+    text: str, bold: bool = False, italic: bool = False, prefer_color: bool = False, use_candidate_cache: bool = True
+) -> FontConfigPattern: ...
 def set_builtin_nerd_font(path: str) -> Union[CoreTextFont, FontConfigPattern]: ...
 
 class FeatureData(TypedDict):
@@ -447,6 +464,7 @@ class Face:
     def get_variable_data(self) -> VariableData: ...
     def identify_for_debug(self) -> str: ...
     def postscript_name(self) -> str: ...
+    def has_codepoint(self, cp: int) -> bool: ...
     def set_size(self, sz_in_pts: float, dpi_x: float, dpi_y: float) -> None: ...
     def render_sample_text(self, text: str, width: int, height: int, fg_color: int = 0xFFFFFF) -> tuple[bytes, int, int]: ...
     def render_codepoint(self, cp: int, fg_color: int = 0xFFFFFF) -> tuple[bytes, int, int]: ...
@@ -514,19 +532,17 @@ def monitor_pid(pid: int) -> None:
 def add_window(os_window_id: int, tab_id: int, title: str) -> int:
     pass
 
-def compile_program(which: int, vertex_shaders: Tuple[str, ...], fragment_shaders: Tuple[str, ...], allow_recompile: bool = False) -> int:
+def compile_program(
+    which: int, vertex_shaders: Tuple[str, ...], fragment_shaders: Tuple[str, ...], metadata: Dict[str, Any], allow_recompile: bool = False
+) -> int:
     pass
 
-def init_cell_program() -> None:
-    pass
-
+def custom_shader_needs_render(before: Tuple[bool, int, int], after: Tuple[bool, int, int], event_mask: int, now: int) -> bool: ...
+def simulate_custom_shader_render_ticks(num_ticks: int, event_mask: int = 0, initialize: bool = False) -> list[bool]: ...
 def set_os_window_chrome(os_window_id: int) -> bool:
     pass
 
 def set_borders_rects(os_window_id: int, tab_id: int, rects: list[Border]) -> None: ...
-def init_borders_program() -> None:
-    pass
-
 def os_window_has_background_image(os_window_id: int) -> bool:
     pass
 
@@ -870,6 +886,9 @@ def background_opacity_of(os_window_id: int) -> Optional[float]:
 def read_command_response(fd: int, timeout: float, list: List[bytes]) -> None:
     pass
 
+def split_into_graphemes(string: str) -> List[str]:
+    pass
+
 def wcswidth(string: str) -> int:
     pass
 
@@ -982,6 +1001,7 @@ def parse_input_from_terminal(
 
 class Line:
     def sprite_at(self, cell: int) -> int: ...
+    def cursor_from(self, x: int, y: int = 0) -> Cursor: ...
 
 def test_shape(line: Line, path: Optional[str] = None, index: int = 0) -> List[Tuple[int, int, int, Tuple[int, ...]]]:
     pass
@@ -1078,7 +1098,6 @@ class Screen:
     def hyperlink_for_id(self, hyperlink_id: int) -> str: ...
     def erase_last_command(self) -> bool: ...
     def set_progress(self, state: int, percent: int) -> None: ...
-    def mark_potential_url_drag(self) -> bool: ...
     def cursor_at_prompt(self) -> bool:
         pass
 
@@ -1169,6 +1188,9 @@ class Screen:
     def clear_selection(self) -> None:
         pass
 
+    def set_mode(self, mode: int, private: bool = False) -> None:
+        pass
+
     def reset_mode(self, mode: int, private: bool = False) -> None:
         pass
 
@@ -1220,6 +1242,7 @@ class Screen:
     def line_edge_colors(self) -> Tuple[int, int]:
         pass
 
+    def ime_text_around_cursor(self) -> Tuple[str, str]: ...
     def current_pointer_shape(self) -> str: ...
     def change_pointer_shape(self, op: str, name: str) -> None: ...
     def bell(self) -> None: ...
@@ -1244,6 +1267,10 @@ def set_window_render_data(
     spaces_top: int,
     spaces_right: int,
     spaces_bottom: int,
+    cp_left: int,
+    cp_top: int,
+    cp_right: int,
+    cp_bottom: int,
 ) -> None:
     pass
 
@@ -1257,7 +1284,6 @@ class ChildMonitor:
         dump_callback: Optional[Callable[[int, str, Any], None]],
         talk_fd: int = -1,
         listen_fd: int = -1,
-        verify_peer_uid: bool = False,
     ):
         pass
 
@@ -1292,6 +1318,8 @@ class ChildMonitor:
         pass
 
     def inject_peer(self, fd: int) -> int: ...
+    def set_wakeup_fd(self, fd: int) -> None: ...
+    def parse_input_once(self) -> bool: ...
 
 class KeyEvent:
     def __init__(
@@ -1538,7 +1566,7 @@ def mask_kitty_signals_process_wide() -> None: ...
 def is_modifier_key(key: int) -> bool: ...
 def base64_encode(src: Union[str, ReadableBuffer], add_padding: bool = False) -> bytes: ...
 def base64_encode_into(src: Union[str, ReadableBuffer], output: WriteableBuffer, add_padding: bool = False) -> int: ...
-def base64_decode(src: Union[str, ReadableBuffer]) -> bytes: ...
+def base64_decode(src: Union[str, ReadableBuffer], strict: bool = False) -> bytes: ...
 def base64_decode_into(src: Union[str, ReadableBuffer], output: WriteableBuffer) -> int: ...
 def cocoa_recreate_global_menu() -> None: ...
 def cocoa_clear_global_shortcuts() -> None: ...
@@ -1611,7 +1639,7 @@ def get_tab_being_dragged() -> tuple[int, bool, float, float]: ...
 def set_window_being_dragged(window_id: int = 0, drag_started: bool = False, x: float = 0.0, y: float = 0.0) -> None: ...
 def get_window_being_dragged() -> tuple[int, bool, float, float]: ...
 def request_callback_with_thumbnail(
-    callback: str, os_window_id: int, window_id: int = 0, include_tab_bar: bool = False, scale: float = 0.25, max_width: int = 480
+    callback: str, os_window_id: int, window_id: int = 0, include_tab_bar: bool = False, scale: float = 0.25, max_width: int = 480, no_scaling: bool = False
 ) -> None: ...
 def png_from_32bit_rgba_data(data: bytes, width: int, height: int, flip_vertically: bool = False) -> bytes: ...
 def set_uint_at_address(address: int, value: int) -> None: ...
