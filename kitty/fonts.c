@@ -14,6 +14,9 @@
 #include "decorations.h"
 #include "glyph-cache.h"
 #include "print-graphics.h"
+#include "bidi.h"
+
+static bool force_bidi_ltr = false;
 
 #define MISSING_GLYPH 1
 #define MAX_NUM_EXTRA_GLYPHS_PUA 4u
@@ -1128,7 +1131,7 @@ load_hb_buffer(CPUCell *first_cpu_cell, index_type num_cells, const TextCache *t
     }
     hb_buffer_add_codepoints(harfbuzz_buffer, shape_buffer.codepoints, num, 0, num);
     hb_buffer_guess_segment_properties(harfbuzz_buffer);
-    if (OPT(force_ltr)) hb_buffer_set_direction(harfbuzz_buffer, HB_DIRECTION_LTR);
+    if (OPT(force_ltr) || force_bidi_ltr) hb_buffer_set_direction(harfbuzz_buffer, HB_DIRECTION_LTR);
 }
 
 
@@ -1342,9 +1345,23 @@ shape(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb
     group_state.last_gpu_cell = first_gpu_cell + (num_cells ? num_cells - 1 : 0);
     load_hb_buffer(first_cpu_cell, num_cells, tc, &lc);
 
-    size_t num_features = fobj->num_ffs_hb_features;
-    if (num_features && !disable_ligature) num_features--;  // the last feature is always -calt
-    hb_shape(font, harfbuzz_buffer, fobj->ffs_hb_features, num_features);
+    if (force_bidi_ltr) {
+        static hb_feature_t bidi_hb_features[4];
+        static bool bidi_features_initialized = false;
+        if (!bidi_features_initialized) {
+            hb_feature_from_string("-rlig", -1, &bidi_hb_features[0]);
+            hb_feature_from_string("-liga", -1, &bidi_hb_features[1]);
+            hb_feature_from_string("-dlig", -1, &bidi_hb_features[2]);
+            hb_feature_from_string("-calt", -1, &bidi_hb_features[3]);
+            bidi_features_initialized = true;
+        }
+        hb_shape(font, harfbuzz_buffer, bidi_hb_features, 4);
+    } else {
+        size_t num_features = fobj->num_ffs_hb_features;
+        if (num_features && !disable_ligature) num_features--;  // the last feature is always -calt
+        hb_shape(font, harfbuzz_buffer, fobj->ffs_hb_features, num_features);
+    }
+
 
     unsigned int info_length, positions_length;
     group_state.info = hb_buffer_get_glyph_infos(harfbuzz_buffer, &info_length);
@@ -1694,12 +1711,8 @@ shape_run(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells
     shape(first_cpu_cell, first_gpu_cell, num_cells, hbf, font, disable_ligature, tc);
     if (font->spacer_strategy == SPACERS_IOSEVKA) group_iosevka(font, hbf, tc, lc);
     else group_normal(font, hbf, tc, lc);
-#if 0
-        static char dbuf[1024];
-        // You can also generate this easily using hb-shape --show-extents --cluster-level=1 --shapers=ot /path/to/font/file text
-        hb_buffer_serialize_glyphs(harfbuzz_buffer, 0, group_state.num_glyphs, dbuf, sizeof(dbuf), NULL, harfbuzz_font_for_face(font->face), HB_BUFFER_SERIALIZE_FORMAT_TEXT, HB_BUFFER_SERIALIZE_FLAG_DEFAULT | HB_BUFFER_SERIALIZE_FLAG_GLYPH_EXTENTS);
-        printf("\n%s\n", dbuf);
-#endif
+
+
     if (scale != 1.f) {
         apply_scale_to_font_group(fg, NULL);
         if (!face_apply_scaling(font->face, (FONTS_DATA_HANDLE)fg) && PyErr_Occurred()) PyErr_Print();
@@ -1748,7 +1761,8 @@ render_groups(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc)
     while (idx <= G(group_idx)) {
         Group *group = G(groups) + idx;
         if (!group->num_cells) break;
-         // printf("Group: idx: %u num_cells: %u num_glyphs: %u first_glyph_idx: %u first_cell_idx: %u total_num_glyphs: %zu\n", idx, group->num_cells, group->num_glyphs, group->first_glyph_idx, group->first_cell_idx, group_state.num_glyphs);
+
+
         if (group->num_glyphs) {
             ensure_glyph_render_scratch_space(MAX(group->num_glyphs, group->num_cells));
             for (unsigned i = 0; i < group->num_glyphs; i++) global_glyph_render_scratch.glyphs[i] = G(info)[group->first_glyph_idx + i].codepoint;
@@ -1897,6 +1911,26 @@ multicell_intersects_cursor(const Line *line, index_type lnum, const Cursor *cur
 
 void
 render_line(FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, DisableLigature disable_ligature_strategy, ListOfChars *lc) {
+    CPUCell *original_cpu_cells = line->cpu_cells;
+    CPUCell stack_bidi_cells[1024];
+    CPUCell *bidi_cells = stack_bidi_cells;
+    bool bidi_allocated = false;
+    bool has_bidi = line_has_bidi(line);
+
+    if (has_bidi) {
+        if (line->xnum > 1024) {
+            bidi_cells = malloc(sizeof(CPUCell) * line->xnum);
+            if (bidi_cells) bidi_allocated = true;
+            else bidi_cells = stack_bidi_cells;
+        }
+        if (bidi_reorder_line(line, bidi_cells, lc)) {
+            line->cpu_cells = bidi_cells;
+            force_bidi_ltr = true;
+        } else {
+            has_bidi = false;
+        }
+    }
+
 #define RENDER if (run_font.font_idx != NO_FONT && i > first_cell_in_run) { \
     int cursor_offset = -1; \
     if (disable_ligature_at_cursor && first_cell_in_run <= cursor->x && cursor->x <= i && cursor->x < line->xnum && \
@@ -1976,6 +2010,12 @@ render_line(FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, 
     }
     RENDER
 #undef RENDER
+
+    if (has_bidi) {
+        force_bidi_ltr = false;
+        line->cpu_cells = original_cpu_cells;
+        if (bidi_allocated) free(bidi_cells);
+    }
 }
 
 StringCanvas

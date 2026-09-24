@@ -16,6 +16,7 @@
 #include "srgb_gamma.h"
 #include "uniforms_generated.h"
 #include "state.h"
+#include "bidi.h"
 
 enum {
     CELL_PROGRAM, CELL_FG_PROGRAM, CELL_BG_PROGRAM, CELL_PROGRAM_SENTINEL,
@@ -529,6 +530,11 @@ cell_update_uniform_block(ssize_t vao_idx, Screen *screen, int uniform_buffer, i
             }
         }
         if (line_for_cursor) {
+            if (line_has_bidi(line_for_cursor)) {
+                index_type vis_x = bidi_log2vis(line_for_cursor, cursor->x);
+                rd->cursor_x1 = vis_x;
+                rd->cursor_x2 = vis_x;
+            }
             colors_for_cell(line_for_cursor, cp, &cell_color_x, &cell_fg, &cell_bg, &reversed);
             const CPUCell *cursor_cell;
             const bool large_cursor = ((cursor_cell = &line_for_cursor->cpu_cells[cursor->x])->is_multicell) && cursor_cell->x == 0 && cursor_cell->y == 0;
