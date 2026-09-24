@@ -104,6 +104,30 @@ sudo dnf install -y gcc git python3-devel harfbuzz-devel freetype-devel fribidi-
 
 ---
 
+## Optional: Desktop Integration
+
+This optional step lets you launch `kitty-rtl` alongside your existing Kitty installation from your application launcher or via keyboard shortcuts without interfering with your system's default terminal:
+
+1. **Create a desktop entry:**
+   ```bash
+   mkdir -p ~/.local/share/applications
+   cat <<EOF > ~/.local/share/applications/kitty-rtl.desktop
+   [Desktop Entry]
+   Type=Application
+   Name=kitty (RTL)
+   GenericName=Terminal emulator
+   Comment=GPU-based terminal with BiDi support
+   Exec=$HOME/.local/bin/kitty-rtl
+   Icon=kitty
+   Categories=System;TerminalEmulator;
+   EOF
+   ```
+
+2. **Custom Keyboard Shortcut:**
+   In your desktop environment's keyboard settings (GNOME, KDE, Hyprland, i3, etc.), you can bind a custom shortcut (e.g. `Super+Alt+Return`) pointing directly to `~/.local/bin/kitty-rtl`.
+
+---
+
 ## Recommended Font Configuration
 
 Because monospace Arabic rendering relies on exact cell proportions, some fonts (such as Cairo or standard proportional fonts) may show cuts or misalignments. The tested and recommended monospace font is **DejaVu Sans Mono**.
