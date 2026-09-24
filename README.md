@@ -2,6 +2,8 @@
 
 A fork of the fast, GPU-based [kitty](https://github.com/kovidgoyal/kitty) terminal emulator adding zero-overhead bidirectional (BiDi) text rendering for Arabic and Hebrew.
 
+> **Upstream Documentation:** For the original upstream Kitty documentation, FAQ, and official project links, see [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md) or visit the official [kitty website](https://sw.kovidgoyal.net/kitty/).
+
 ---
 
 ## Why this fork?
@@ -49,9 +51,7 @@ All changes in this fork are confined to the rendering layer and do not alter Ki
 
 | Upstream Kitty (LTR scrambled) | kitty-rtl (Natural BiDi rendering) |
 | :---: | :---: |
-| ![Before](docs/screenshots/before_placeholder.png) | ![After](docs/screenshots/after_placeholder.png) |
-
-*(Screenshots can be added to `docs/screenshots/`)*
+| ![Before](docs/screenshots/before.png) | ![After](docs/screenshots/after.png) |
 
 ---
 
